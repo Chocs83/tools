@@ -1,0 +1,10 @@
+[Unit]
+Description=주간 Claude QA 로그 생성 (~/qa-log)
+Documentation=file:///home/chocs/qa-log/README.md
+
+[Service]
+Type=oneshot
+ExecStart=/home/chocs/qa-log/weekly_qa_log.sh
+# 요약 작성에 claude 헤드리스 호출이 여러 번 들어가므로 넉넉하게
+TimeoutStartSec=3h
+Nice=10

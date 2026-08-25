@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.state/
+# Generated QA logs live in ~/qa-log/<project>/ and stay there.  They are
+# verbatim transcripts of working sessions and have been observed to contain
+# host addresses and a sudo password, so the OUTPUT is never published -- only
+# the tooling that produces it.
+qa-log/*/
+qa-log/*.md
+!qa-log/README.md
+# Anything holding a webhook or a key.  wifi_report reads its webhook from
+# /etc/wifi_report.conf on the device; that file is a bearer credential and
+# belongs nowhere near this repo.
+*.conf
+*secret*
+*credential*
