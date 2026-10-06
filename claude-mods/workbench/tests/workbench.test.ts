@@ -65,7 +65,7 @@ const start = ($: any) => $.session.start({ source: 'startup', cwd: '/w' })
 test('pane draws the four sections', async ($: any, on: any) => {
   mock.clock(on, { now: NOW })
   const ui = await mountPane($)
-  for (const title of ['▍작업', '▍사용량', '▍장치', '▍오늘 결과물']) {
+  for (const title of ['클로드·택시', '▍작업', '▍장치', '▍오늘 결과물']) {
     expect(await ui.find({ type: 'Text', text: title })).toBeDefined()
   }
   await ui.unmount()
@@ -80,7 +80,12 @@ test('session start fills cost, gauges, files and devices', async ($: any, on: a
   expect(calls.some(a => a[0] === 'npx' && a.includes('--since') && a.includes('20261001'))).toBe(true)
   expect(await ui.find({ type: 'Text', text: /\$16\.73/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /\$43\.77/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: / 62% 124k\/200k/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /62%/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'context ' })).toBeDefined()
+  // the meter reads today's ccusage cost in won: 16.73 * 1400
+  // digits and horse are five terminal rows tall
+  expect(await ui.find({ key: 'fare' })).toMatchObject({ props: { rows: 5 } })
+  expect(await ui.find({ key: 'car' })).toMatchObject({ props: { rows: 5, columns: 20 } })
   // default filter: images, md, docs — the csv is hidden
   expect(await ui.find({ type: 'Button', text: /plot\.png/ })).toBeDefined()
   expect(await ui.find({ type: 'Button', text: /notes\.md/ })).toBeDefined()
@@ -154,5 +159,52 @@ test('an empty transcript says so instead of asking the model', async ($: any, o
   await ui.press({ key: 'sum-refresh' })
   expect(asked).toBe(false)
   expect(await ui.find({ type: 'Text', text: /아직 요약할 대화가 없습니다/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the taximeter runs a ride and asks the fare', async ($: any, on: any) => {
+  const { clock } = world(on, { ssh: false })
+  on('session.start', ($2: any, e: any) => ({ cwd: e.cwd }))
+  on('session.measure', ($2: any, e: any) => ({ changed: e.changed }))
+  on('turn.start', ($2: any, e: any) => ({ turnId: e.turnId }))
+  on('turn.complete', ($2: any, e: any) => ({ text: e.answer }))
+  await start($)
+  await clock.settle()
+  const measure = (usd: number) =>
+    $.session.measure({
+      context: { tokens: 150_000, window: 200_000, percent: 75 },
+      rateLimits: [
+        { kind: 'five_hour', percentUsed: 62, resetsAt: new Date(NOW + 2 * 3600_000).toISOString() },
+        { kind: 'seven_day', percentUsed: 25 },
+      ],
+      cost: { usd },
+      changed: ['cost'],
+    })
+  await measure(1.0)
+  const ui = await mountPane($)
+  expect(await ui.find({ type: 'Text', text: ' 빈차 ' })).toMatchObject({ props: { bold: true } })
+
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await measure(1.5)
+  // context 75% while driving: surcharge, which outranks 복합
+  expect(await ui.find({ type: 'Text', text: ' 할증 ' })).toMatchObject({ props: { bold: true } })
+  // dollars first, won in parentheses; the month named by its first day
+  expect((await ui.find({ key: 't-money' }))?.text).toContain('이번 주행 $0.50 (₩700) · 오늘 $18.23 (₩25,522) · 10/1~ $43.77 (₩61,278) · ccusage')
+  // context and the 5-hour limit carry their percentage inside the bar
+  expect(await ui.find({ type: 'Text', text: /75%/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /62%/ })).toBeDefined()
+  // 5H and 7D are bars like context, the time left written inside: 62%(2h00m)
+  const limits = (await ui.find({ key: 't-limits' }))?.text ?? ''
+  expect(limits).toContain('62%(2h00m)')
+  expect(limits).toContain(' 5H ')
+  expect(limits).toContain(' 7D ')
+  expect(limits).toContain('25%')
+
+  await $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: ' 지불 ' })).toMatchObject({ props: { bold: true } })
+  expect((await ui.find({ key: 't-money' }))?.text).toMatch(/^요금 \$0\.50 \(₩700\) · 오늘/)
+  await clock.advance(16_000)
+  expect(await ui.find({ type: 'Text', text: ' 빈차 ' })).toMatchObject({ props: { bold: true } })
   await ui.unmount()
 })

@@ -1,11 +1,13 @@
 {
   "name": "chocs-mods",
-  "owner": { "name": "Chocs83" },
+  "owner": {
+    "name": "Chocs83"
+  },
   "plugins": [
     {
       "name": "workbench",
       "source": "./claude-mods/workbench",
-      "description": "우측 사이드바 작업대: 작업 요약·진행 / 사용량(ccusage)·모델 / 장치 / 오늘 결과물"
+      "description": "우측 사이드바 작업대: 클로드·택시 미터(모델·요금·한도) / 작업 요약·진행 / 장치 / 오늘 결과물"
     }
   ]
 }

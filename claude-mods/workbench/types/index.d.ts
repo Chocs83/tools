@@ -59,6 +59,15 @@ export type WbDevice = {
   throttled?: number
 }
 
+/** The taximeter's running figures, in USD; the session's own ledger moves the meter between ccusage runs. */
+export type WbMeter = {
+  sessionUsd?: number
+  baseSessionUsd?: number
+  rideStartUsd?: number
+  lastRide?: { usd: number; endedAt: number }
+  tokPerSec?: number
+}
+
 export type WbModel = { model: string; effort?: string }
 
 export type WbFile = { path: string; mtime: number; size: number }
@@ -74,6 +83,7 @@ declare module 'claude-code' {
       tasks: WbTask[]
       usage: WbUsage | null
       model: WbModel | null
+      meter: WbMeter
       cost: WbCost | null
       devices: WbDevice[]
       files: WbFile[]
