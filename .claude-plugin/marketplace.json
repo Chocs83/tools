@@ -1,0 +1,11 @@
+{
+  "name": "chocs-mods",
+  "owner": { "name": "Chocs83" },
+  "plugins": [
+    {
+      "name": "workbench",
+      "source": "./claude-mods/workbench",
+      "description": "우측 사이드바 작업대: 작업 요약·진행 / 사용량(ccusage)·모델 / 장치 / 오늘 결과물"
+    }
+  ]
+}
