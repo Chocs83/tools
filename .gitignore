@@ -14,3 +14,8 @@ qa-log/*.md
 *.conf
 *secret*
 *credential*
+
+# usage data is personal (cost + token volume) -- tools only, never the data
+ai-usage/*.csv
+ai-usage/*.html
+ai-usage/.state/

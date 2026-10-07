@@ -1,0 +1,10 @@
+[Unit]
+Description=AI CLI 사용량 일일 스냅샷 (~/ai-usage)
+Documentation=file:///home/chocs/project/tools/ai-usage/README.md
+
+[Service]
+Type=oneshot
+ExecStart=/home/chocs/project/tools/ai-usage/daily_usage.sh --artifact /home/chocs/ai-usage/artifact.html
+# ccusage 가 세션 jsonl 을 전부 다시 읽으므로 넉넉하게
+TimeoutStartSec=20min
+Nice=15
