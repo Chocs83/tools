@@ -23,8 +23,8 @@ active_prio=-9999
 active_name=""
 
 show_table() {
-  printf "\n%s%-22s %-24s %8s %5s %-7s %s%s\n" "$BOLD" \
-         NAME SSID PRIORITY AUTO ACTIVE IPv4 "$OFF"
+  printf "\n%s%-22s %-24s %6s %8s %5s %-7s %s%s\n" "$BOLD" \
+         NAME SSID HIDDEN PRIORITY AUTO ACTIVE IPv4 "$OFF"
   # sort by priority descending: that is the order NetworkManager will try them
   while IFS= read -r line; do
     name=$line
@@ -32,6 +32,7 @@ show_table() {
     prio=$(nmcli -g connection.autoconnect-priority con show "$name" 2>/dev/null)
     auto=$(nmcli -g connection.autoconnect con show "$name" 2>/dev/null)
     ssid=$(nmcli -g 802-11-wireless.ssid con show "$name" 2>/dev/null)
+    hid=$(nmcli -g 802-11-wireless.hidden con show "$name" 2>/dev/null)
     m=$(nmcli -g ipv4.method con show "$name" 2>/dev/null)
     addr=$(nmcli -g ipv4.addresses con show "$name" 2>/dev/null)
     dev=$(nmcli -g GENERAL.DEVICES con show "$name" 2>/dev/null)
@@ -48,8 +49,12 @@ show_table() {
     fi
     col=""
     [ "$auto" = "no" ] && col=$DIM
-    printf "%s%-22s %-24s %8s %5s %-7b %s%s\n" \
-           "$col" "$name" "${ssid:--}" "${prio:-0}" "$auto" "${act:--}" "$ip4" "$OFF"
+    # 숨김 여부를 표에 세워둔다. 이 열이 안 보이면 "프로필은 있는데 왜 안 붙지"
+    # 를 알 방법이 없다 -- 현장에서 실제로 그 상태로 막혔다.
+    hcol=""; [ "$hid" = "yes" ] && hcol=$YEL
+    printf "%s%-22s %-24s %s%6s%s%s %8s %5s %-7b %s%s\n" \
+           "$col" "$name" "${ssid:--}" "$hcol" "${hid:--}" "$OFF" "$col" \
+           "${prio:-0}" "$auto" "${act:--}" "$ip4" "$OFF"
   done < <(nmcli -g NAME con show | sort -u \
            | while read -r n; do
                p=$(nmcli -g connection.autoconnect-priority con show "$n" 2>/dev/null)
@@ -70,6 +75,13 @@ nmcli dev wifi rescan >/dev/null 2>&1
 sleep 2
 nmcli -f SSID,SIGNAL,FREQ,SECURITY dev wifi list 2>/dev/null \
   | awk 'NR==1 || ($1!="--" && !seen[$1]++)' | head -12
+# 숨김 AP는 비콘에 SSID를 안 실어서 위 목록에 '--' 로만 나온다. 몇 개나 있는지
+# 알려주지 않으면 "목록에 없으니 신호가 안 잡히는 것" 으로 오해하게 된다.
+n_hidden=$(nmcli -t -f SSID dev wifi list 2>/dev/null | grep -c '^$' || true)
+if [ "${n_hidden:-0}" -gt 0 ]; then
+  echo "${DIM}(이름 없는 AP ${n_hidden}개가 더 보인다 = 숨김 망. 목록에 없어도"
+  echo " SSID를 정확히 입력하고 아래 '숨김' 에 y 를 주면 붙는다)${OFF}"
+fi
 
 # ---- SSID -----------------------------------------------------------------
 echo
@@ -90,6 +102,21 @@ else
   read -rp "프로필 이름 [$SSID]: " CONNAME
   CONNAME=${CONNAME:-$SSID}
 fi
+
+# ---- hidden ---------------------------------------------------------------
+# 숨김 망은 이것 하나로 갈린다. NetworkManager 는 hidden=no 인 프로필에 대해
+# 수동 스캔만 하는데, 숨김 AP 의 비콘에는 SSID 가 없으므로 그 망을 영원히 못 본다.
+# hidden=yes 여야 SSID 를 명시한 directed probe 를 보내고 AP 가 답한다.
+# 현장에서 실제로 여기에 막혔다: 프로필은 멀쩡한데 hidden 이 no 라 붙지 않았고,
+# yes 로 바꾸자마자 신호 99 로 잡혔다.
+CUR_HIDDEN=no
+[ -n "$CONNAME" ] && CUR_HIDDEN=$(nmcli -g 802-11-wireless.hidden con show "$CONNAME" 2>/dev/null || echo no)
+read -rp "숨김(hidden) 망인가? [y/N] (현재: $CUR_HIDDEN): " HID
+case "${HID:-}" in
+  [yY]*) HIDDEN=yes ;;
+  [nN]*) HIDDEN=no ;;
+  *)     HIDDEN=$CUR_HIDDEN ;;      # 그냥 엔터 = 기존 값 유지
+esac
 
 # ---- password -------------------------------------------------------------
 read -rsp "비밀번호 (빈 값이면 열린 망 / 기존 유지): " PSK; echo
@@ -158,6 +185,8 @@ else
         connection.autoconnect no \
         connection.autoconnect-priority "$PRIO" || exit 1
 fi
+
+nmcli con mod "$CONNAME" 802-11-wireless.hidden "$HIDDEN" || exit 1
 
 if [ -n "$PSK" ]; then
   nmcli con mod "$CONNAME" wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$PSK" || exit 1
