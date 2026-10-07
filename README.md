@@ -7,6 +7,8 @@
 |---|---|
 | [network/](network/) | 헤드리스 CM4의 Wi-Fi 설정, 부팅 시 IP 보고(웹훅), 신규 보드 셋업 |
 | [qa-log/](qa-log/) | Claude Code 세션에서 내가 보낸 요청을 주 단위로 모으는 자동 리포트 |
+| [ai-usage/](ai-usage/) | ccusage 일별 사용량을 WSL·Windows 여러 소스에서 모아 영구 CSV와 월별 HTML 리포트로 쌓는 타이머 (데이터는 `~/ai-usage/`, 여기엔 도구만) |
+| [tmp_clean/](tmp_clean/) | `~/tmp/날짜/` 작업 폴더 정리: 볼 만한 것(png·md·문서·스크립트)과 링크된 파일만 남기고 지움, 기본은 목록만 |
 | [claude-mods/](claude-mods/) | Claude Code mod — `workbench`: 우측 사이드바 작업대(클로드·택시 미터 / 작업 요약·진행 / 장치 / 오늘 결과물) |
 
 ## Claude Code mod 설치
