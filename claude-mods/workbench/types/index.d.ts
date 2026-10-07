@@ -84,6 +84,7 @@ declare module 'claude-code' {
       usage: WbUsage | null
       model: WbModel | null
       meter: WbMeter
+      usageView: 'gui' | 'text'
       cost: WbCost | null
       devices: WbDevice[]
       files: WbFile[]

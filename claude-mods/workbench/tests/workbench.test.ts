@@ -208,3 +208,27 @@ test('the taximeter runs a ride and asks the fare', async ($: any, on: any) => {
   expect(await ui.find({ type: 'Text', text: ' 빈차 ' })).toMatchObject({ props: { bold: true } })
   await ui.unmount()
 })
+
+test('the usage view switches between the meter and the plain table', async ($: any, on: any) => {
+  const { clock } = world(on, { ssh: false })
+  on('session.start', ($2: any, e: any) => ({ cwd: e.cwd }))
+  await start($)
+  await clock.settle()
+  const ui = await mountPane($)
+  // GUI by default: the taxi meter on top, no plain table
+  expect(await ui.find({ key: 'taxi' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '▍사용량' })).toBeUndefined()
+
+  await ui.press({ key: 'view-text' })
+  expect(await ui.find({ key: 'taxi' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '▍사용량' })).toBeDefined()
+  expect(await ui.find({ key: 'c-today' })).toBeDefined()
+  expect(await ui.find({ key: 'g-ctx' })).toBeDefined()
+  // the table takes the meter's place: first in the pane, above 작업
+  const order = (await ui.findAll({ type: 'Text' })).map((t: any) => t.text)
+  expect(order.indexOf('▍사용량')).toBeLessThan(order.indexOf('▍작업'))
+
+  await ui.press({ key: 'view-gui' })
+  expect(await ui.find({ key: 'taxi' })).toBeDefined()
+  await ui.unmount()
+})

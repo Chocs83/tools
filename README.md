@@ -20,7 +20,7 @@
 `Add marketplace?` 에 `y`, 범위는 user 를 고른다. 업데이트는 `claude plugin update workbench@chocs-mods` 후 `/reload-plugins`.
 
 - 패널이 자동으로 뜨려면 터미널 폭 144칸 이상, 아니면 `/wb` 로 연다. `/wb sum` 은 세션 전체 정밀 요약.
-- 맨 위 **클로드·택시**: 오늘 사용량을 원화 미터로(1$=1,400원 고정), 모델·effort·tok/s, context·5H·7D 막대, 빈차/주행/할증/복합/지불 상태. 택시는 출력 속도에 맞춰 달린다.
+- 맨 위 **클로드·택시**: 오늘 사용량을 원화 미터로(1$=1,400원 고정), 모델·effort·tok/s, context·5H·7D 막대, 빈차/주행/할증/복합/지불 상태. 택시는 출력 속도에 맞춰 달린다. 화려한 게 싫으면 `/wb text` (또는 미터 오른쪽 위 `텍스트`)로 평범한 표로 바꾼다 — `/wb gui` 로 복귀, 선택은 저장된다.
 - 사용량은 `npx ccusage@20.0.26` 으로 계산한다(Node 필요, 첫 실행 때 내려받음).
 - 장치는 ssh/scp 로 접속했던 `user@IP` 를 키 인증(BatchMode)으로 확인한다 — 비밀번호 접속 장치는 "ping만 응답"으로 보인다.
 - 오늘 결과물은 `~/tmp` 아래 오늘 수정된 파일, 클릭하면 Windows(WSL) `explorer.exe` 로 연다.

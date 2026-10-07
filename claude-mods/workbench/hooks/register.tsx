@@ -22,6 +22,9 @@ const liveA = atom({ plugin: 'workbench', key: 'live' } as const, {
 const tasksA = atom({ plugin: 'workbench', key: 'tasks' } as const, [])
 const usageA = atom({ plugin: 'workbench', key: 'usage' } as const, null)
 const meterA = atom({ plugin: 'workbench', key: 'meter' } as const, {})
+// 'gui': the taxi meter at the top; 'text': the plain usage section under 작업.
+const usageViewA = atom({ plugin: 'workbench', key: 'usageView' } as const, 'gui')
+const USAGE_VIEW_STORE = 'usageView'
 const modelA = atom({ plugin: 'workbench', key: 'model' } as const, null)
 const costA = atom({ plugin: 'workbench', key: 'cost' } as const, null)
 const devicesA = atom({ plugin: 'workbench', key: 'devices' } as const, [])
@@ -101,6 +104,14 @@ const liveTokRate = () => {
 const stepInterval = (tokPerSec: number) => (tokPerSec < 5 ? 420 : Math.min(420, Math.max(90, 520 - tokPerSec * 3.5)))
 
 let carStep = 0
+// Mirrors usageViewA for the animation timer, which runs too often to read state for it.
+let isGuiView = true
+
+const setUsageView = async ($: $T, view: 'gui' | 'text') => {
+  isGuiView = view === 'gui'
+  await update($, usageViewA, () => view)
+  await $.store.set(USAGE_VIEW_STORE, view)
+}
 
 // ---------- formatting ----------
 
@@ -681,8 +692,8 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'wb',
-      description: '작업대 pane 열기 (/wb sum: 세션 전체 정밀 요약, /wb close: 닫기)',
-      argumentHint: '[sum|close]',
+      description: '작업대 pane 열기 (/wb sum: 세션 전체 정밀 요약, /wb gui|text: 사용량 표시 방식, /wb close: 닫기)',
+      argumentHint: '[sum|gui|text|close]',
     })
 
     home = (await $.env.get('HOME')) ?? ''
@@ -704,6 +715,11 @@ export const register: Register = on => {
       const stored = (await $.store.get(DEVICE_STORE)) as WbDevice[] | undefined
       const list = stored?.length ? stored : await seedDevices($)
       await update($, devicesA, () => list)
+    }
+    const view = (await $.store.get(USAGE_VIEW_STORE)) as 'gui' | 'text' | undefined
+    if (view === 'gui' || view === 'text') {
+      isGuiView = view === 'gui'
+      await update($, usageViewA, () => view)
     }
     const kinds = (await $.store.get('fileKinds')) as string[] | undefined
     if (kinds) await update($, fileKindsA, () => kinds)
@@ -731,6 +747,7 @@ export const register: Register = on => {
     const TICK = 80
     $.clock.every(TICK, () => {
       void (async () => {
+        if (!isGuiView) return
         const live = await read($, liveA)
         // The colour needs four reads; once every half second is plenty.
         if (colorAge <= 0 || live.isRunning !== wasRunning) {
@@ -770,6 +787,7 @@ export const register: Register = on => {
     }
     await $.ui.open({ id: PANE, title: TITLE })
     if (arg === 'sum') void summarize($, 'fork')
+    if (arg === 'gui' || arg === 'text') await setUsageView($, arg)
     return {}
   })
 
@@ -902,6 +920,7 @@ export const register: Register = on => {
     const cost = await read($, costA)
     const model = await read($, modelA)
     const meter = await read($, meterA)
+    const usageView = await read($, usageViewA)
     const devices = await read($, devicesA)
     const files = await read($, filesA)
     const kinds = await read($, fileKindsA)
@@ -967,6 +986,8 @@ export const register: Register = on => {
         {model ? <Text bold color={C.white}>{modelName(model.model)}</Text> : null}
         {model?.effort ? <Text color={C.blue}>{model.effort}</Text> : null}
         {meter.tokPerSec !== undefined ? <Text color={C.lime}>{`${meter.tokPerSec.toFixed(1)} tok/s`}</Text> : null}
+        <Box flexGrow={1} />
+        <Button key="view-text" plain dimColor label="텍스트" onPress={() => void setUsageView($, 'text')} />
       </Box>,
     )
 
@@ -1103,7 +1124,7 @@ export const register: Register = on => {
       </Box>,
     )
 
-    line(
+    if (usageView === 'gui') line(
       <Box
         key="taxi"
         flexDirection="column"
@@ -1116,6 +1137,58 @@ export const register: Register = on => {
       </Box>,
       meterUsed,
     )
+
+    // --- 0'. 사용량 (텍스트 보기: 미터기 이전의 표, 미터와 같은 맨 위 자리) ---
+    if (usageView === 'text') {
+      line(
+        rule(
+          '사용량',
+          <Box flexDirection="row" columnGap={1}>
+            <Text dimColor>{cost ? `ccusage ${fmtAgo(now - cost.updatedAt)}${cost.error ? ' (갱신 실패)' : ''}` : 'ccusage 계산 중…'}</Text>
+            <Button key="view-gui" plain dimColor label="GUI" onPress={() => void setUsageView($, 'gui')} />
+          </Box>,
+        ),
+      )
+      const labelW = 9
+      if (model) {
+        line(
+          <Box key="m" flexDirection="row">
+            <Text>{'모델'.padEnd(labelW - 2)}</Text>
+            <Text bold wrap="truncate-end">{`${modelName(model.model)}${model.effort ? ' · ' + model.effort : ''}`}</Text>
+          </Box>,
+        )
+      }
+      if (cost) {
+        line(
+          <Box key="c-today" flexDirection="row">
+            <Text>{'오늘'.padEnd(labelW - 2)}</Text>
+            <Text bold>{usd(todayUsd).padStart(9)}</Text>
+            <Text dimColor>{`  ${kTokens(cost.todayTokens)} tok`}</Text>
+          </Box>,
+        )
+        line(
+          <Box key="c-month" flexDirection="row">
+            <Text>{'이번 달'.padEnd(labelW - 3)}</Text>
+            <Text bold>{usd(cost.month).padStart(9)}</Text>
+            <Text dimColor>{`  ${cost.monthStart}~ · ${kTokens(cost.monthTokens)} tok`}</Text>
+          </Box>,
+        )
+      }
+      const tailW = 22
+      const barW = Math.min(24, Math.max(6, W - labelW - tailW))
+      const gauge = (label: string, pct: number | undefined, right: string, key: string) =>
+        line(
+          <Box key={key} flexDirection="row">
+            <Text>{label.padEnd(labelW - Math.min(4, label.replace(/[ -~]/g, '').length))}</Text>
+            <Text color={pct === undefined ? 'inactive' : levelColor(pct)}>{bar(pct ?? 0, barW)}</Text>
+            <Text wrap="truncate-end">{` ${pct === undefined ? '--' : String(Math.round(pct)).padStart(3)}% ${right}`}</Text>
+          </Box>,
+        )
+      if (usage) {
+        for (const l of usage.limits) gauge(limitLabel(l.kind), l.percentUsed, fmtLeft(l.resetsAt, now), `g-${l.kind}`)
+        gauge('컨텍스트', usage.ctxPercent, `${kTokens(usage.ctxTokens)}/${kTokens(usage.ctxWindow)}`, 'g-ctx')
+      }
+    }
 
     // --- 1. 작업: 요약 + 진행 + 백그라운드 작업 ---
     gap()
