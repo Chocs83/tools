@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import { CAR_WIDTH, bitmapWidth, groupThousands, tallBitmap, taxiCar, textBitmap, toRaster, toRasterPalette } from './taxi'
-import type { WbCost, WbDevice, WbFile, WbLimit, WbSummary, WbTask, WbUsage } from '../types'
+import type { WbCost, WbFile, WbLimit, WbSummary, WbTask, WbTodo, WbUsage } from '../types'
 
 type $T = EngineInterface
 
@@ -27,7 +27,11 @@ const usageViewA = atom({ plugin: 'workbench', key: 'usageView' } as const, 'gui
 const USAGE_VIEW_STORE = 'usageView'
 const modelA = atom({ plugin: 'workbench', key: 'model' } as const, null)
 const costA = atom({ plugin: 'workbench', key: 'cost' } as const, null)
-const devicesA = atom({ plugin: 'workbench', key: 'devices' } as const, [])
+const todosA = atom({ plugin: 'workbench', key: 'todos' } as const, [])
+/** Each session keeps its own list under `todos:<session id>`; the bare `todos` key was the old shared one. */
+const TODO_STORE_PREFIX = 'todos:'
+const TODO_STORE_KEEP = 20
+const todoStoreKey = async ($: $T) => TODO_STORE_PREFIX + (await $.session.id())
 const filesA = atom({ plugin: 'workbench', key: 'files' } as const, [])
 const fileKindsA = atom({ plugin: 'workbench', key: 'fileKinds' } as const, ['img', 'md', 'doc'])
 const tzA = atom({ plugin: 'workbench', key: 'tzOffsetMin' } as const, 0)
@@ -36,7 +40,6 @@ const tickA = atom({ plugin: 'workbench', key: 'tick' } as const, 0)
 const CCUSAGE = 'ccusage@20.0.26'
 const COST_EVERY_MS = 5 * 60_000
 const COST_AFTER_TURN_MIN_MS = 60_000
-const DEVICE_EVERY_MS = 30_000
 const FILES_EVERY_MS = 30_000
 const SHOW_FINISHED_MS = 10 * 60_000
 const KEEP_FINISHED = 6
@@ -231,20 +234,32 @@ const textOf = (content: unknown): string => {
 
 // ---------- the summary ----------
 
-const SUMMARY_SYSTEM =
-  '너는 개발 세션 옆 사이드바에 띄울 "현재 작업" 카드를 쓰는 요약기다. 반드시 JSON 한 개만 출력한다. ' +
-  '형식: {"goal":"...","done":["...","..."],"now":"...","next":"..."} . ' +
-  'goal=사용자가 이 세션에서 이루려는 것(한 줄), done=최근 끝낸 것 최대 3개, now=지금 하고 있는 것, ' +
-  'next=다음 단계(모르면 빈 문자열). 모두 한국어, 각 항목 45자 이내, 군더더기 없이 명사형으로.'
+const CARD_FORMAT =
+  '{"goal":"...","now":"...","done":["..."],"todos":[{"id":"...","text":"...","state":"todo|doing|done"}]}'
 
-const FORK_PROMPT =
-  '이 세션 옆 사이드바에 띄울 "현재 작업" 카드를 만들어줘. 도구는 쓰지 말고 JSON 한 개만 출력해. ' +
-  '형식: {"goal":"...","done":["..."],"now":"...","next":"..."} . goal=이 세션 전체의 목표, ' +
-  'done=지금까지 끝낸 핵심 성과 최대 3개(숫자 포함), now=현재 진행 중인 것, next=남은 다음 단계. ' +
-  '모두 한국어, 각 45자 이내.'
+const CARD_RULES =
+  'goal=진행 중인 일 전반의 요약(무엇을 왜 하는지 한 줄), now=지금 하고 있는 것, ' +
+  'done=최근 수행한 것 최대 4개(최신이 앞, 숫자·파일명 포함). ' +
+  'todos=정해진 목표를 이루기 위한 할일 항목. 사용자가 목표나 작업을 정하면 그때 단계별 항목으로 나누고, ' +
+  '목표가 없으면 빈 배열. 최대 8개, 순서는 할 순서. 기존 항목은 id 를 그대로 두고 state 만 갱신한다 ' +
+  '(끝났으면 done, 하는 중이면 doing). 사용자가 취소하거나 더 이상 뜻이 없는 항목은 뺀다. ' +
+  'manual 이 true 인 항목의 state 는 사용자가 직접 정한 것이니 바꾸지 않는다. 새 항목은 id 를 빈 문자열로. ' +
+  '모두 한국어, 각 문장 45자 이내, 군더더기 없이 명사형으로.'
+
+const SUMMARY_SYSTEM =
+  '너는 개발 세션 옆 사이드바에 띄울 "작업" 카드와 "할일" 목록을 쓰는 요약기다. 반드시 JSON 한 개만 출력한다. ' +
+  '형식: ' + CARD_FORMAT + ' . ' + CARD_RULES
+
+const forkPrompt = (todos: readonly WbTodo[]) =>
+  '이 세션 옆 사이드바에 띄울 "작업" 카드와 "할일" 목록을 만들어줘. 도구는 쓰지 말고 JSON 한 개만 출력해. ' +
+  '형식: ' + CARD_FORMAT + ' . ' + CARD_RULES +
+  (todos.length ? '\n[현재 할일 목록]\n' + JSON.stringify(todoRows(todos)) : '')
+
+const todoRows = (todos: readonly WbTodo[]) =>
+  todos.map(t => ({ id: t.id, text: t.text, state: t.state, ...(t.manual ? { manual: true } : {}) }))
 
 /** What the card is made from, read from the transcript itself so a reload or resume loses nothing. */
-const buildDigest = async ($: $T, prev: WbSummary | null): Promise<string | null> => {
+const buildDigest = async ($: $T, prev: WbSummary | null, todos: readonly WbTodo[]): Promise<string | null> => {
   const messages = await $.session.messages()
   const prompts: string[] = []
   const actions: string[] = []
@@ -269,31 +284,97 @@ const buildDigest = async ($: $T, prev: WbSummary | null): Promise<string | null
   const parts: string[] = []
   if (prev) {
     parts.push(
-      '[이전 카드]\n' + JSON.stringify({ goal: prev.goal, done: prev.done, now: prev.now, next: prev.next }),
+      '[이전 카드]\n' + JSON.stringify({ goal: prev.goal, now: prev.now, done: prev.done }),
     )
   }
+  if (todos.length) parts.push('[현재 할일 목록]\n' + JSON.stringify(todoRows(todos)))
   if (prompts.length) parts.push('[최근 사용자 요청]\n' + prompts.map(p => '- ' + p).join('\n'))
   if (actions.length) parts.push('[최근 도구 작업]\n' + actions.map(a => '- ' + a).join('\n'))
   if (answer) parts.push('[어시스턴트의 마지막 답변]\n' + clip(answer, 2500))
   parts.push(
-    '위 개발 세션 기록으로 카드를 갱신해. 이전 카드의 goal 은 주제가 바뀌지 않았으면 유지해.\n' +
-      '출력은 {"goal":"...","done":["..."],"now":"...","next":"..."} 형식의 JSON 한 개뿐이다. 인사·설명·코드펜스 금지.',
+    '위 개발 세션 기록으로 카드와 할일 목록을 갱신해. 이전 카드의 goal 은 주제가 바뀌지 않았으면 유지하고, ' +
+      '할일은 기록에 근거가 있을 때만 state 를 바꾸거나 항목을 더해.\n' +
+      '출력은 ' + CARD_FORMAT + ' 형식의 JSON 한 개뿐이다. 인사·설명·코드펜스 금지.',
   )
   return parts.join('\n\n')
 }
 
-const parseSummary = (text: string, source: WbSummary['source'], now: number): WbSummary | null => {
+const TODO_STATES: WbTodo['state'][] = ['todo', 'doing', 'done']
+const TODO_MAX = 8
+
+type Parsed = { card: WbSummary; todos: WbTodo[] | undefined }
+
+/** The model's reply, checked field by field; `todos` stays undefined when the reply left them out. */
+const parseSummary = (
+  text: string,
+  source: WbSummary['source'],
+  now: number,
+  prevTodos: readonly WbTodo[],
+): Parsed | null => {
   const a = text.indexOf('{')
   const b = text.lastIndexOf('}')
   if (a < 0 || b <= a) return null
   try {
     const o = JSON.parse(text.slice(a, b + 1)) as Record<string, unknown>
     const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
-    const done = Array.isArray(o.done) ? o.done.map(str).filter(Boolean).slice(0, 3) : []
-    return { goal: str(o.goal), done, now: str(o.now), next: str(o.next), updatedAt: now, source }
+    const done = Array.isArray(o.done) ? o.done.map(str).filter(Boolean).slice(0, 4) : []
+    const card: WbSummary = { goal: str(o.goal), done, now: str(o.now), updatedAt: now, source }
+    if (!Array.isArray(o.todos)) return { card, todos: undefined }
+    const byId = new Map(prevTodos.map(t => [t.id, t]))
+    const todos: WbTodo[] = []
+    let seq = 0
+    for (const raw of o.todos) {
+      if (!raw || typeof raw !== 'object') continue
+      const r = raw as Record<string, unknown>
+      const text = str(r.text)
+      if (!text) continue
+      const prev = byId.get(str(r.id))
+      const asked = str(r.state) as WbTodo['state']
+      const state = prev?.manual ? prev.state : TODO_STATES.includes(asked) ? asked : prev?.state ?? 'todo'
+      const id = prev?.id ?? `${now.toString(36)}${(seq++).toString(36)}`
+      todos.push({
+        id,
+        text,
+        state,
+        manual: prev?.manual,
+        addedAt: prev?.addedAt ?? now,
+        updatedAt: prev && prev.state === state && prev.text === text ? prev.updatedAt : now,
+      })
+      if (todos.length >= TODO_MAX) break
+    }
+    return { card, todos }
   } catch {
     return null
   }
+}
+
+const saveTodos = async ($: $T, todos: WbTodo[]) => {
+  await update($, todosA, () => todos)
+  // Kept per session, so a resume gets its own list back and other sessions never see it.
+  await $.store.set(await todoStoreKey($), todos)
+}
+
+/** Drops the old shared list and every session list but the newest few. */
+const pruneTodoStore = async ($: $T, keep: string) => {
+  const keys = await $.store.keys()
+  if (keys.includes('todos')) await $.store.delete('todos')
+  const mine = keys.filter(k => k.startsWith(TODO_STORE_PREFIX) && k !== keep)
+  for (const k of mine.slice(0, Math.max(0, mine.length - (TODO_STORE_KEEP - 1)))) await $.store.delete(k)
+}
+
+/** A click walks an item todo → doing → done → todo and pins it against the summarizer. */
+const cycleTodo = async ($: $T, id: string) => {
+  const now = await $.clock.now()
+  const todos = (await read($, todosA)).map(t => {
+    if (t.id !== id) return t
+    const state = TODO_STATES[(TODO_STATES.indexOf(t.state) + 1) % TODO_STATES.length] ?? 'todo'
+    return { ...t, state, manual: true, updatedAt: now }
+  })
+  await saveTodos($, todos)
+}
+
+const removeTodo = async ($: $T, id: string) => {
+  await saveTodos($, (await read($, todosA)).filter(t => t.id !== id))
 }
 
 const summarize = async ($: $T, source: WbSummary['source']) => {
@@ -301,14 +382,15 @@ const summarize = async ($: $T, source: WbSummary['source']) => {
   await update($, summaryBusyA, () => true)
   try {
     const prev = await read($, summaryA)
-    const digest = source === 'fork' ? FORK_PROMPT : await buildDigest($, prev)
+    const prevTodos = await read($, todosA)
+    const digest = source === 'fork' ? forkPrompt(prevTodos) : await buildDigest($, prev, prevTodos)
     if (digest === null) {
       await update($, summaryErrorA, () => '아직 요약할 대화가 없습니다')
       return
     }
     const r =
       source === 'fork'
-        ? await $.model.fork({ prompt: FORK_PROMPT })
+        ? await $.model.fork({ prompt: digest })
         : await $.model.complete({
             model: 'haiku',
             system: SUMMARY_SYSTEM,
@@ -321,9 +403,10 @@ const summarize = async ($: $T, source: WbSummary['source']) => {
       await update($, summaryErrorA, () => `${r.reason}${detail}`)
       return
     }
-    const card = parseSummary(r.text, source, await $.clock.now())
-    if (card) {
-      await update($, summaryA, () => card)
+    const parsed = parseSummary(r.text, source, await $.clock.now(), prevTodos)
+    if (parsed) {
+      await update($, summaryA, () => parsed.card)
+      if (parsed.todos) await saveTodos($, parsed.todos)
       await update($, summaryErrorA, () => '')
     } else {
       await update($, summaryErrorA, () => `응답 해석 실패: ${clip(r.text.replace(/\s+/g, ' '), 60)}`)
@@ -499,151 +582,6 @@ const refreshCost = async ($: $T) => {
   }
 }
 
-// ---------- devices ----------
-
-const DEVICE_STORE = 'devices'
-const IP_RE = /\b([a-z_][\w-]*)@(\d{1,3}(?:\.\d{1,3}){3})\b/g
-const PROBE =
-  'hostname; cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo -; ' +
-  "vcgencmd get_throttled 2>/dev/null || echo -; tr -d '\\0' < /proc/device-tree/model 2>/dev/null || echo -"
-
-const boardOf = (model: string | undefined) => {
-  if (!model) return ''
-  const cm = model.match(/Compute Module (\d+)/i)
-  if (cm) return `CM${cm[1]}`
-  const pi = model.match(/Raspberry Pi (\d+)/i)
-  return pi ? `Pi${pi[1]}` : clip(model, 12)
-}
-
-const saveDevices = async ($: $T, list: WbDevice[]) => {
-  await update($, devicesA, () => list)
-  // Kept across sessions so "last IP / last seen" survives a restart.
-  await $.store.set(
-    DEVICE_STORE,
-    list.map(d => ({ ...d, online: false, pingable: undefined })),
-  )
-}
-
-const learnDevices = async ($: $T, command: string) => {
-  if (!/\b(ssh|scp|rsync|sftp)\b/.test(command)) return
-  const found = [...command.matchAll(IP_RE)].map(m => ({ user: m[1] ?? '', ip: m[2] ?? '' }))
-  if (!found.length) return
-  const now = await $.clock.now()
-  const list = await read($, devicesA)
-  let changed = false
-  const next = [...list]
-  for (const f of found) {
-    if (next.some(d => d.ip === f.ip)) continue
-    next.push({ user: f.user, ip: f.ip, addedAt: now, online: false })
-    changed = true
-  }
-  if (changed) {
-    await saveDevices($, next)
-    void probeDevices($)
-  }
-}
-
-/** First run only: the last few ssh targets of recent transcripts. */
-const seedDevices = async ($: $T) => {
-  const r = await $.process.run(
-    [
-      'bash',
-      '-c',
-      'ls -tr "$HOME"/.claude/projects/*/*.jsonl 2>/dev/null | tail -4 | ' +
-        "xargs -r grep -ahoE '\\b(ssh|scp|rsync)\\b[^\"]{0,160}\\b[a-z_][a-z0-9_-]*@[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+' | " +
-        "grep -oE '[a-z_][a-z0-9_-]*@[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+' | tail -400",
-    ],
-    { timeoutMs: 20_000 },
-  )
-  const seen: string[] = []
-  for (const line of r.stdout.split('\n').reverse()) {
-    const t = line.trim()
-    if (t && !seen.includes(t)) seen.push(t)
-    if (seen.length >= 3) break
-  }
-  const now = await $.clock.now()
-  return seen.map(s => {
-    const [user = '', ip = ''] = s.split('@')
-    return { user, ip, addedAt: now, online: false } as WbDevice
-  })
-}
-
-let probing = false
-
-const probeDevices = async ($: $T) => {
-  if (probing) return
-  probing = true
-  try {
-    const list = await read($, devicesA)
-    if (!list.length) return
-    const now = await $.clock.now()
-    const results = await Promise.all(
-      list.map(async (d): Promise<WbDevice> => {
-        const r = await $.process.run(
-          [
-            'ssh',
-            '-o', 'BatchMode=yes',
-            '-o', 'ConnectTimeout=3',
-            '-o', 'StrictHostKeyChecking=accept-new',
-            `${d.user}@${d.ip}`,
-            PROBE,
-          ],
-          { timeoutMs: 10_000 },
-        )
-        if (r.exitCode === 0) {
-          const [host = '', temp = '-', thr = '-', model = '-'] = r.stdout.split('\n').map(s => s.trim())
-          const milli = Number(temp)
-          const t = thr.match(/0x([0-9a-f]+)/i)
-          return {
-            ...d,
-            hostname: host || d.hostname,
-            model: model !== '-' ? model : d.model,
-            online: true,
-            pingable: true,
-            lastSeen: now,
-            lastChecked: now,
-            tempC: Number.isFinite(milli) && temp !== '-' ? milli / 1000 : undefined,
-            throttled: t ? parseInt(t[1] ?? '0', 16) : undefined,
-          }
-        }
-        const p = await $.process.run(['ping', '-c', '1', '-W', '1', d.ip], { timeoutMs: 4000 })
-        return { ...d, online: false, pingable: p.exitCode === 0, lastChecked: now, tempC: undefined, throttled: undefined }
-      }),
-    )
-    // One row per board: an IP a board answered on supersedes its older IPs.
-    const byHost = new Map<string, WbDevice>()
-    const loose: WbDevice[] = []
-    for (const d of results) {
-      if (!d.hostname) {
-        loose.push(d)
-        continue
-      }
-      const prev = byHost.get(d.hostname)
-      if (!prev || (d.lastSeen ?? 0) > (prev.lastSeen ?? 0)) byHost.set(d.hostname, d)
-    }
-    const known = new Set([...byHost.values()].map(d => d.ip))
-    // An IP that never answered is forgotten after a week.
-    const kept = loose.filter(d => !known.has(d.ip) && now - d.addedAt < 7 * 86_400_000)
-    await saveDevices($, [...byHost.values(), ...kept])
-  } finally {
-    probing = false
-  }
-}
-
-const THROTTLE_NOW: [number, string][] = [
-  [0x1, '저전압'],
-  [0x2, '클럭제한'],
-  [0x4, '스로틀'],
-  [0x8, '온도제한'],
-]
-
-const throttleText = (v: number | undefined) => {
-  if (v === undefined) return { now: '', past: '' }
-  const now = THROTTLE_NOW.filter(([b]) => v & b).map(([, n]) => n)
-  const past = THROTTLE_NOW.filter(([b]) => v & (b << 16)).map(([, n]) => n)
-  return { now: now.join('·'), past: past.join('·') }
-}
-
 // ---------- today's outputs ----------
 
 const KINDS: { id: string; label: string; exts: string[] }[] = [
@@ -692,8 +630,8 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'wb',
-      description: '작업대 pane 열기 (/wb sum: 세션 전체 정밀 요약, /wb gui|text: 사용량 표시 방식, /wb close: 닫기)',
-      argumentHint: '[sum|gui|text|close]',
+      description: '작업대 pane 열기 (/wb sum: 세션 전체 정밀 요약, /wb todo clear: 할일 비우기, /wb gui|text: 사용량 표시 방식, /wb close: 닫기)',
+      argumentHint: '[sum|todo clear|gui|text|close]',
     })
 
     home = (await $.env.get('HOME')) ?? ''
@@ -711,11 +649,12 @@ export const register: Register = on => {
     const model = await $.session.model()
     await update($, modelA, cur => ({ model, effort: cur?.model === model ? cur.effort : undefined }))
 
-    if ((await read($, devicesA)).length === 0) {
-      const stored = (await $.store.get(DEVICE_STORE)) as WbDevice[] | undefined
-      const list = stored?.length ? stored : await seedDevices($)
-      await update($, devicesA, () => list)
+    const todoKey = await todoStoreKey($)
+    if ((await read($, todosA)).length === 0) {
+      const stored = (await $.store.get(todoKey)) as WbTodo[] | undefined
+      if (stored?.length) await update($, todosA, () => stored)
     }
+    void pruneTodoStore($, todoKey).catch(() => undefined)
     const view = (await $.store.get(USAGE_VIEW_STORE)) as 'gui' | 'text' | undefined
     if (view === 'gui' || view === 'text') {
       isGuiView = view === 'gui'
@@ -725,10 +664,8 @@ export const register: Register = on => {
     if (kinds) await update($, fileKindsA, () => kinds)
 
     void refreshCost($)
-    void probeDevices($)
     void refreshFiles($)
     $.clock.every(COST_EVERY_MS, () => void refreshCost($))
-    $.clock.every(DEVICE_EVERY_MS, () => void probeDevices($))
     $.clock.every(FILES_EVERY_MS, () => void refreshFiles($))
     $.clock.every(5000, () => {
       void (async () => {
@@ -787,6 +724,7 @@ export const register: Register = on => {
     }
     await $.ui.open({ id: PANE, title: TITLE })
     if (arg === 'sum') void summarize($, 'fork')
+    if (arg === 'todo clear') await saveTodos($, [])
     if (arg === 'gui' || arg === 'text') await setUsageView($, arg)
     return {}
   })
@@ -806,7 +744,6 @@ export const register: Register = on => {
     }
     const ran = await next(e)
     try {
-      if (e.tool === 'Bash' && typeof args.command === 'string') void learnDevices($, args.command)
       if (ran.deny === undefined && !ran.isError) {
         const result = (ran.result ?? {}) as Record<string, unknown>
         const now = await $.clock.now()
@@ -831,6 +768,15 @@ export const register: Register = on => {
     }
     return ran
   }).catch(($, e, next) => next(e))
+
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') {
+      await update($, todosA, () => [])
+      await update($, summaryA, () => null)
+      await update($, summaryErrorA, () => '')
+    }
+    return next(e)
+  })
 
   on('session.append', async ($, e, next) => {
     const stored = await next(e)
@@ -921,7 +867,7 @@ export const register: Register = on => {
     const model = await read($, modelA)
     const meter = await read($, meterA)
     const usageView = await read($, usageViewA)
-    const devices = await read($, devicesA)
+    const todos = await read($, todosA)
     const files = await read($, filesA)
     const kinds = await read($, fileKindsA)
     const tz = await read($, tzA)
@@ -1210,9 +1156,9 @@ export const register: Register = on => {
     )
     if (card) {
       if (card.goal) line(<Text wrap="wrap">{'🎯 ' + card.goal}</Text>, Math.ceil((card.goal.length * 2 + 3) / W))
-      for (const d of card.done) line(<Text dimColor wrap="truncate-end">{'✓ ' + d}</Text>)
       if (card.now) line(<Text color="suggestion" wrap="truncate-end">{'▶ ' + card.now}</Text>)
-      if (card.next) line(<Text wrap="truncate-end">{'→ ' + card.next}</Text>)
+      if (card.done.length) line(<Text dimColor>최근 수행</Text>)
+      for (const d of card.done) line(<Text dimColor wrap="truncate-end">{'  ✓ ' + d}</Text>)
       line(
         <Text dimColor wrap="truncate-end">
           {`  ${fmtAgo(now - card.updatedAt)} · ${card.source === 'fork' ? '정밀' : 'haiku'}`}
@@ -1271,61 +1217,44 @@ export const register: Register = on => {
       )
     }
 
-    // --- 3. 장치 ---
+    // --- 3. 할일: 정해진 목표를 단계로 나눈 목록 (클릭 = 상태 바꾸기) ---
     gap()
-    line(rule('장치', <Text dimColor>{devices.length ? '30초마다 확인' : ''}</Text>))
-    const named = devices.filter(d => d.hostname)
-    const unnamed = devices.filter(d => !d.hostname)
-    const sortedDevices = [...named].sort(
-      (a, b) => Number(b.online) - Number(a.online) || (b.lastSeen ?? 0) - (a.lastSeen ?? 0),
+    const nDone = todos.filter(t => t.state === 'done').length
+    line(
+      rule(
+        '할일',
+        <Box flexDirection="row" gap={1}>
+          {todos.length ? <Text dimColor>{`${nDone}/${todos.length}`}</Text> : null}
+          {nDone ? (
+            <Button
+              key="todo-sweep"
+              plain
+              dimColor
+              label="끝난것 지움"
+              onPress={() => void saveTodos($, todos.filter(t => t.state !== 'done'))}
+            />
+          ) : null}
+        </Box>,
+      ),
     )
-    if (!devices.length) line(<Text dimColor>ssh/scp 로 접속한 장치가 생기면 여기에 표시</Text>)
-    for (const d of sortedDevices) {
-      const name = [boardOf(d.model), d.hostname].filter(Boolean).join(' ')
-      if (d.online) {
-        const th = throttleText(d.throttled)
-        const temp = d.tempC
-        const isHot = temp !== undefined && temp >= 65
-        line(
-          <Box key={`d-${d.ip}`} flexDirection="row">
-            <Text color="success">{'● '}</Text>
-            <Text wrap="truncate-end">
-              {`${name} ${d.ip}${temp !== undefined && !isHot ? ` ${temp.toFixed(1)}°C` : ''}`}
-            </Text>
-          </Box>,
-        )
-        // Only trouble gets a line: heat, throttling now, or throttling since boot.
-        const issues = [
-          isHot ? `${temp.toFixed(1)}°C` : '',
-          th.now ? `⚠ ${th.now}` : '',
-        ].filter(Boolean)
-        if (issues.length) {
-          line(
-            <Text color={th.now || (temp ?? 0) >= 80 ? 'error' : 'warning'} wrap="truncate-end">
-              {'   ' + issues.join(' · ')}
-            </Text>,
-          )
-        }
-        if (th.past) line(<Text dimColor wrap="truncate-end">{`   부팅 후 발생: ${th.past}`}</Text>)
-      } else {
-        line(
-          <Box key={`d-${d.ip}`} flexDirection="row">
-            <Text dimColor>{'○ '}</Text>
-            <Text dimColor wrap="truncate-end">
-              {`${name} ${d.ip} · ${d.lastSeen ? fmtAgo(now - d.lastSeen) : '?'} · ${
-                d.pingable === undefined ? '확인 중' : d.pingable ? 'ping만 응답' : '응답 없음'
-              }`}
-            </Text>
-          </Box>,
-        )
-      }
+    if (!todos.length) {
+      line(<Text dimColor>목표가 정해지면 할일을 항목으로 나누어 표시 (요약과 함께 갱신)</Text>)
     }
-    if (unnamed.length) {
-      line(
-        <Text dimColor wrap="truncate-end">
-          {`○ 미확인 IP: ${unnamed.map(d => `${d.ip}${d.pingable ? '(ping)' : ''}`).join(', ')}`}
-        </Text>,
+    for (const t of todos) {
+      const mark = t.state === 'done' ? '[x]' : t.state === 'doing' ? '[▶]' : '[ ]'
+      rows.push(
+        <Box key={`t-${t.id}`} flexDirection="row">
+          <Button
+            key={`todo-${t.id}`}
+            plain
+            dimColor={t.state === 'done'}
+            label={clip(`${mark} ${t.text}`, Math.max(8, W - 3))}
+            onPress={() => void cycleTodo($, t.id)}
+          />
+          <Button key={`todo-rm-${t.id}`} plain dimColor label=" ×" onPress={() => void removeTodo($, t.id)} />
+        </Box>,
       )
+      used += 1
     }
 
     // --- 4. 오늘 결과물 ---

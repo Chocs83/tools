@@ -23,25 +23,18 @@ const CCUSAGE_JSON = JSON.stringify({
   totals: { totalCost: 43.77, totalTokens: 78_396_908 },
 })
 
-const world = (on: any, opts: { ssh?: boolean } = {}) => {
+const world = (on: any) => {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on)
+  on('session.id', () => ({ value: 'sess-test' }))
   mock.env(on, { HOME: '/home/u' })
   const calls: string[][] = []
   on('process.run', ($: any, e: any) => {
     const argv: string[] = [...e.argv]
     calls.push(argv)
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
-    const fail = { value: { exitCode: 255, stdout: '', stderr: 'no route', isStdoutTruncated: false, isStderrTruncated: false } }
     if (argv[0] === 'date') return ok('+0900\n')
     if (argv[0] === 'npx') return ok(CCUSAGE_JSON)
-    if (argv[0] === 'ssh') {
-      return opts.ssh
-        ? ok('pi-cm5\n52300\nthrottled=0x50000\nRaspberry Pi Compute Module 5 Rev 1.0\n')
-        : fail
-    }
-    if (argv[0] === 'ping') return fail
-    if (argv[0] === 'bash' && argv[2]?.includes('.jsonl')) return ok('pi@192.0.2.5\n')
     if (argv[0] === 'bash' && argv[2]?.includes('find')) {
       return ok(
         `${NOW / 1000 - 60}\t100\t/home/u/tmp/2026-10-06/plot.png\n` +
@@ -65,14 +58,14 @@ const start = ($: any) => $.session.start({ source: 'startup', cwd: '/w' })
 test('pane draws the four sections', async ($: any, on: any) => {
   mock.clock(on, { now: NOW })
   const ui = await mountPane($)
-  for (const title of ['클로드·택시', '▍작업', '▍장치', '▍오늘 결과물']) {
+  for (const title of ['클로드·택시', '▍작업', '▍할일', '▍오늘 결과물']) {
     expect(await ui.find({ type: 'Text', text: title })).toBeDefined()
   }
   await ui.unmount()
 })
 
-test('session start fills cost, gauges, files and devices', async ($: any, on: any) => {
-  const { calls, clock } = world(on, { ssh: true })
+test('session start fills cost, gauges and files', async ($: any, on: any) => {
+  const { calls, clock } = world(on)
   on('session.start', ($2: any, e: any) => ({ cwd: e.cwd }))
   await start($)
   await clock.settle()
@@ -92,29 +85,26 @@ test('session start fills cost, gauges, files and devices', async ($: any, on: a
   expect(await ui.find({ type: 'Button', text: /data\.csv/ })).toBeUndefined()
   await ui.press({ key: 'k-data' })
   expect(await ui.find({ type: 'Button', text: /data\.csv/ })).toBeDefined()
-  // the seeded board answered: name, temperature, sticky throttle bits
-  expect(await ui.find({ type: 'Text', text: 'CM5 pi-cm5 192.0.2.5 52.3°C' })).toBeDefined()
-  // no current throttling: nothing said about it, only the since-boot record
-  expect(await ui.find({ type: 'Text', text: /스로틀 없음|⚠/ })).toBeUndefined()
+  // nothing probes boards any more
+  expect(calls.some(a => a[0] === 'ssh' || a[0] === 'ping')).toBe(false)
   // limits show only the time left, in parentheses
   expect(await ui.find({ type: 'Text', text: /남음|↻/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: 'Opus 5.5 1M' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /부팅 후 발생: 저전압·스로틀/ })).toBeDefined()
-  await ui.unmount()
-})
-
-test('an unreachable device shows its last IP', async ($: any, on: any) => {
-  const { clock } = world(on, { ssh: false })
-  on('session.start', ($2: any, e: any) => ({ cwd: e.cwd }))
-  await start($)
-  await clock.settle()
-  const ui = await mountPane($)
-  expect(await ui.find({ type: 'Text', text: /미확인 IP: 192\.0\.2\.5/ })).toBeDefined()
   await ui.unmount()
 })
 
 test('the summary is made from the transcript', async ($: any, on: any) => {
   mock.clock(on, { now: NOW })
+  on('session.id', () => ({ value: 'sess-test' }))
+  // one store hook of the test's own: it records the todos and answers nothing for every key
+  let stored: any[] = []
+  const mem: Record<string, unknown> = {}
+  on('store.get', ($2: any, e: any) => ({ value: mem[e.key] }))
+  on('store.set', ($2: any, e: any) => {
+    mem[e.key] = e.value
+    if (String(e.key).startsWith('todos:')) stored = e.value
+    return { value: undefined }
+  })
   let sent = ''
   on('session.messages', () => ({
     value: [
@@ -127,12 +117,16 @@ test('the summary is made from the transcript', async ($: any, on: any) => {
       { role: 'user', text: '<task-notification>x</task-notification>', toolUses: [] },
     ],
   }))
+  // one model hook, registered before the first use of $; `reply` is what it answers at the time
+  let reply =
+    '{"goal":"작업대 mod 개선","now":"요약 경로 수정","done":["사용량 표시 수정"],' +
+    '"todos":[{"id":"","text":"장치 섹션 제거","state":"done"},{"id":"","text":"할일 섹션 추가","state":"doing"},{"id":"","text":"실사용 확인","state":"todo"}]}'
   on('model.complete', ($2: any, e: any) => {
     sent = e.prompt
     return {
       value: {
         isAnswered: true,
-        text: '{"goal":"작업대 mod 개선","done":["사용량 표시 수정"],"now":"요약 경로 수정","next":"실사용 확인"}',
+        text: reply,
         usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
       },
     }
@@ -144,6 +138,28 @@ test('the summary is made from the transcript', async ($: any, on: any) => {
   expect(sent).not.toContain('task-notification')
   expect(await ui.find({ type: 'Text', text: '🎯 작업대 mod 개선' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '▶ 요약 경로 수정' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '  ✓ 사용량 표시 수정' })).toBeDefined()
+  // the todos came with the card: counted, drawn in order, kept in the store
+  expect(await ui.find({ type: 'Text', text: '1/3' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: '[x] 장치 섹션 제거' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: '[▶] 할일 섹션 추가' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: '[ ] 실사용 확인' })).toBeDefined()
+  expect(stored.length).toBe(3)
+  // a click moves an item on and pins it; the next summary may not move it back
+  const id = stored[2].id
+  await ui.press({ key: `todo-${id}` })
+  expect(await ui.find({ type: 'Button', text: '[▶] 실사용 확인' })).toBeDefined()
+  sent = ''
+  reply = `{"goal":"작업대 mod 개선","now":"테스트","done":[],"todos":[{"id":"${id}","text":"실사용 확인","state":"todo"}]}`
+  await ui.press({ key: 'sum-refresh' })
+  expect(sent).toContain('[현재 할일 목록]')
+  expect(sent).toContain('"manual":true')
+  expect(await ui.find({ type: 'Button', text: '[▶] 실사용 확인' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: /장치 섹션 제거/ })).toBeUndefined()
+  // the sweep button removes finished items; × removes one
+  await ui.press({ key: `todo-rm-${id}` })
+  expect(await ui.find({ type: 'Button', text: /실사용 확인/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /목표가 정해지면/ })).toBeDefined()
   await ui.unmount()
 })
 

@@ -9,7 +9,7 @@
 | [qa-log/](qa-log/) | Claude Code 세션에서 내가 보낸 요청을 주 단위로 모으는 자동 리포트 |
 | [ai-usage/](ai-usage/) | ccusage 일별 사용량을 WSL·Windows 여러 소스에서 모아 영구 CSV와 월별 HTML 리포트로 쌓는 타이머 (데이터는 `~/ai-usage/`, 여기엔 도구만) |
 | [tmp_clean/](tmp_clean/) | `~/tmp/날짜/` 작업 폴더 정리: 볼 만한 것(png·md·문서·스크립트)과 링크된 파일만 남기고 지움, 기본은 목록만 |
-| [claude-mods/](claude-mods/) | Claude Code mod — `workbench`: 우측 사이드바 작업대(클로드·택시 미터 / 작업 요약·진행 / 장치 / 오늘 결과물) |
+| [claude-mods/](claude-mods/) | Claude Code mod — `workbench`: 우측 사이드바 작업대(클로드·택시 미터 / 작업 요약·진행 / 할일 / 오늘 결과물) |
 
 ## Claude Code mod 설치
 
@@ -24,7 +24,7 @@
 - 패널이 자동으로 뜨려면 터미널 폭 144칸 이상, 아니면 `/wb` 로 연다. `/wb sum` 은 세션 전체 정밀 요약.
 - 맨 위 **클로드·택시**: 오늘 사용량을 원화 미터로(1$=1,400원 고정), 모델·effort·tok/s, context·5H·7D 막대, 빈차/주행/할증/복합/지불 상태. 택시는 출력 속도에 맞춰 달린다. 화려한 게 싫으면 `/wb text` (또는 미터 오른쪽 위 `텍스트`)로 평범한 표로 바꾼다 — `/wb gui` 로 복귀, 선택은 저장된다.
 - 사용량은 `npx ccusage@20.0.26` 으로 계산한다(Node 필요, 첫 실행 때 내려받음).
-- 장치는 ssh/scp 로 접속했던 `user@IP` 를 키 인증(BatchMode)으로 확인한다 — 비밀번호 접속 장치는 "ping만 응답"으로 보인다.
+- 작업은 진행 중인 일 전반의 요약 + 지금 하는 것 + 최근 수행한 것(haiku 가 턴마다 갱신, `정밀` 은 세션 전체). 할일은 목표가 정해지면 단계별 항목으로 나눠 같이 갱신된다 — 항목 클릭으로 [ ]→[▶]→[x] 를 바꾸면 그 상태는 고정, `×` 로 지움, `/wb todo clear` 로 비움. 할일은 세션별로 따로 보관된다 (같은 세션을 resume 하면 돌아오고, 다른 세션에는 보이지 않는다).
 - 오늘 결과물은 `~/tmp` 아래 오늘 수정된 파일, 클릭하면 Windows(WSL) `explorer.exe` 로 연다.
 
 ## 이 repo는 public이다

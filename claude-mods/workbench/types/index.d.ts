@@ -1,10 +1,20 @@
+/** The 작업 card: what is going on overall, what is being done now, and what was done lately. */
 export type WbSummary = {
   goal: string
-  done: string[]
   now: string
-  next: string
+  done: string[]
   updatedAt: number
   source: 'auto' | 'fork'
+}
+
+/** One 할일 item: a step toward the goal the session settled on. `manual` pins a state the person set by clicking. */
+export type WbTodo = {
+  id: string
+  text: string
+  state: 'todo' | 'doing' | 'done'
+  manual?: boolean
+  addedAt: number
+  updatedAt: number
 }
 
 export type WbLive = {
@@ -45,20 +55,6 @@ export type WbCost = {
   error?: string
 }
 
-export type WbDevice = {
-  user: string
-  ip: string
-  hostname?: string
-  model?: string
-  addedAt: number
-  lastSeen?: number
-  lastChecked?: number
-  online: boolean
-  pingable?: boolean
-  tempC?: number
-  throttled?: number
-}
-
 /** The taximeter's running figures, in USD; the session's own ledger moves the meter between ccusage runs. */
 export type WbMeter = {
   sessionUsd?: number
@@ -86,7 +82,7 @@ declare module 'claude-code' {
       meter: WbMeter
       usageView: 'gui' | 'text'
       cost: WbCost | null
-      devices: WbDevice[]
+      todos: WbTodo[]
       files: WbFile[]
       fileKinds: string[]
       tzOffsetMin: number
