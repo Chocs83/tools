@@ -1,7 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import { CAR_WIDTH, bitmapWidth, groupThousands, tallBitmap, taxiCar, textBitmap, toRaster, toRasterPalette } from './taxi'
 import type { WbCost, WbFile, WbLimit, WbSummary, WbTask, WbTodo, WbUsage } from '../types'
 
 type $T = EngineInterface
@@ -21,10 +20,8 @@ const liveA = atom({ plugin: 'workbench', key: 'live' } as const, {
 })
 const tasksA = atom({ plugin: 'workbench', key: 'tasks' } as const, [])
 const usageA = atom({ plugin: 'workbench', key: 'usage' } as const, null)
+// The session's own spend ledger: moves "오늘" between ccusage runs.
 const meterA = atom({ plugin: 'workbench', key: 'meter' } as const, {})
-// 'gui': the taxi meter at the top; 'text': the plain usage section under 작업.
-const usageViewA = atom({ plugin: 'workbench', key: 'usageView' } as const, 'gui')
-const USAGE_VIEW_STORE = 'usageView'
 const modelA = atom({ plugin: 'workbench', key: 'model' } as const, null)
 const costA = atom({ plugin: 'workbench', key: 'cost' } as const, null)
 const todosA = atom({ plugin: 'workbench', key: 'todos' } as const, [])
@@ -43,87 +40,6 @@ const COST_AFTER_TURN_MIN_MS = 60_000
 const FILES_EVERY_MS = 30_000
 const SHOW_FINISHED_MS = 10 * 60_000
 const KEEP_FINISHED = 6
-// Fixed rate for the meter's 원 figure; the USD figures stay exact beside it.
-const KRW_PER_USD = 1400
-const PAY_SHOW_MS = 15_000
-// The meter's LCD: a dark glass on dark themes, a pale one (Solarized base2/base02) on light themes.
-const LCD = {
-  dark: { bg: 0x141414, fg: 0xf2f2f2, car: { K: 0x3a3a3a, C: 0xb8b8b8, D: 0x4a4a4a, R: 0xf2f2f2, S: 0x8a8a8a } },
-  light: { bg: 0xeee8d5, fg: 0x073642, car: { K: 0x586e75, C: 0x93a1a1, D: 0x657b83, R: 0x073642, S: 0x586e75 } },
-}
-let lcd = LCD.dark
-/** Picks the LCD palette from the person's theme (`/config` → theme); light-* themes take the pale glass. */
-const refreshLcd = async ($: EngineInterface) => {
-  try {
-    const row = (await $.config.list()).find(r => r.key === 'theme')
-    lcd = String(row?.value ?? 'dark').startsWith('light') ? LCD.light : LCD.dark
-  } catch {
-    /* no config surface: keep the current palette */
-  }
-}
-const BODY_GRAY = 0x8a8a8a
-const BODY_GREEN = 0x7cdb6e
-
-type TaxiState = '빈차' | '주행' | '할증' | '복합' | '지불'
-
-const taxiStateOf = (
-  live: { isRunning: boolean },
-  meter: { lastRide?: { endedAt: number } },
-  tasks: readonly WbTask[],
-  ctxPct: number | undefined,
-  now: number,
-): TaxiState => {
-  if (live.isRunning) {
-    if ((ctxPct ?? 0) >= 70) return '할증'
-    return tasks.some(t => t.status === 'running') ? '복합' : '주행'
-  }
-  return meter.lastRide && now - meter.lastRide.endedAt < PAY_SHOW_MS ? '지불' : '빈차'
-}
-
-const mix = (a: number, b: number, t: number) => {
-  const k = Math.min(1, Math.max(0, t))
-  const ch = (sh: number) => Math.round(((a >> sh) & 255) * (1 - k) + ((b >> sh) & 255) * k) << sh
-  return ch(16) | ch(8) | ch(0)
-}
-
-/** The taxi's body: 빈차·지불 gray, 주행·복합 green, 할증 yellow at 70% context going red at 100%. */
-const bodyColor = (state: TaxiState, ctxPct: number | undefined) =>
-  state === '할증' ? mix(0xffd84a, 0xff3b3b, ((ctxPct ?? 70) - 70) / 30) : state === '주행' || state === '복합' ? BODY_GREEN : BODY_GRAY
-
-const carPalette = (body: number): Record<string, number> => ({
-  Y: 0xffd84a,
-  B: body,
-  W: 0x9fd3ff,
-  L: 0xfff3b0,
-  ...lcd.car,
-})
-
-// How fast the model is writing right now, from the streamed pieces (about 4 characters a token).
-const streamSamples: { t: number; n: number }[] = []
-const STREAM_WINDOW_MS = 1500
-const noteStreamed = (n: number) => {
-  const t = Date.now()
-  streamSamples.push({ t, n })
-  while (streamSamples.length && t - (streamSamples[0]?.t ?? t) > STREAM_WINDOW_MS) streamSamples.shift()
-}
-const liveTokRate = () => {
-  const t = Date.now()
-  let n = 0
-  for (const s of streamSamples) if (t - s.t <= STREAM_WINDOW_MS) n += s.n
-  return n / 4 / (STREAM_WINDOW_MS / 1000)
-}
-/** Milliseconds per animation step: a crawl while tools run, flat out at 120+ tok/s. */
-const stepInterval = (tokPerSec: number) => (tokPerSec < 5 ? 420 : Math.min(420, Math.max(90, 520 - tokPerSec * 3.5)))
-
-let carStep = 0
-// Mirrors usageViewA for the animation timer, which runs too often to read state for it.
-let isGuiView = true
-
-const setUsageView = async ($: $T, view: 'gui' | 'text') => {
-  isGuiView = view === 'gui'
-  await update($, usageViewA, () => view)
-  await $.store.set(USAGE_VIEW_STORE, view)
-}
 
 // ---------- formatting ----------
 
@@ -637,8 +553,9 @@ const refreshFiles = async ($: $T) => {
   if (!same) await update($, filesA, () => files)
 }
 
+/** Opens a file with the desktop's default app (native Linux; the old WSL path went through explorer.exe). */
 const openInWindows = async ($: $T, path: string) => {
-  await $.process.run(['bash', '-c', 'explorer.exe "$(wslpath -w "$1")"', '_', path], { timeoutMs: 10_000 })
+  await $.process.run(['xdg-open', path], { timeoutMs: 10_000 })
 }
 
 // ---------- registration ----------
@@ -649,8 +566,8 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'wb',
-      description: '작업대 pane 열기 (/wb sum: 세션 전체 정밀 요약, /wb todo clear: 할일 비우기, /wb task clear: 백그라운드 작업 목록 정리, /wb gui|text: 사용량 표시 방식, /wb close: 닫기)',
-      argumentHint: '[sum|todo clear|task clear|gui|text|close]',
+      description: '작업대 pane 열기 (/wb sum: 세션 전체 정밀 요약, /wb todo clear: 할일 비우기, /wb task clear: 백그라운드 작업 목록 정리, /wb close: 닫기)',
+      argumentHint: '[sum|todo clear|task clear|close]',
     })
 
     home = (await $.env.get('HOME')) ?? ''
@@ -676,11 +593,6 @@ export const register: Register = on => {
       if (stored?.length) await update($, todosA, () => stored)
     }
     void pruneTodoStore($, todoKey).catch(() => undefined)
-    const view = (await $.store.get(USAGE_VIEW_STORE)) as 'gui' | 'text' | undefined
-    if (view === 'gui' || view === 'text') {
-      isGuiView = view === 'gui'
-      await update($, usageViewA, () => view)
-    }
     const kinds = (await $.store.get('fileKinds')) as string[] | undefined
     if (kinds) await update($, fileKindsA, () => kinds)
 
@@ -695,39 +607,6 @@ export const register: Register = on => {
         const hasRunning = tasks.some(t => t.status === 'running')
         if (hasRunning) await pollTails($)
         if (live.isRunning || hasRunning) await update($, tickA, n => n + 1)
-      })()
-    })
-    let sinceStep = 0
-    let shown = ''
-    let color = BODY_GRAY
-    let colorAge = 0
-    let wasRunning = false
-    const TICK = 80
-    $.clock.every(TICK, () => {
-      void (async () => {
-        if (!isGuiView) return
-        const live = await read($, liveA)
-        // The colour needs four reads; once every half second is plenty.
-        if (colorAge <= 0 || live.isRunning !== wasRunning) {
-          const ctx = (await read($, usageA))?.ctxPercent
-          const state = taxiStateOf(live, await read($, meterA), await read($, tasksA), ctx, await $.clock.now())
-          color = bodyColor(state, ctx)
-          colorAge = 6
-        }
-        colorAge--
-        wasRunning = live.isRunning
-        if (live.isRunning) {
-          sinceStep += TICK
-          if (sinceStep >= stepInterval(liveTokRate())) {
-            sinceStep = 0
-            carStep++
-          }
-        }
-        const key = `${live.isRunning ? carStep : 'parked'}:${color}`
-        if (key === shown) return
-        shown = key
-        const r = toRasterPalette(taxiCar(carStep, live.isRunning), carPalette(color), lcd.bg)
-        await $.ui.blit({ requestId: PANE, key: 'car', cells: r.cells }).catch(() => undefined)
       })()
     })
     // Relative times ("3분 전") move even while nothing else does.
@@ -747,14 +626,12 @@ export const register: Register = on => {
     if (arg === 'sum') void summarize($, 'fork')
     if (arg === 'todo clear') await saveTodos($, [])
     if (arg === 'task clear') await retireRunning($)
-    if (arg === 'gui' || arg === 'text') await setUsageView($, arg)
     return {}
   })
 
   on('turn.start', async ($, e, next) => {
     const now = await $.clock.now()
     await update($, liveA, () => ({ isRunning: true, startedAt: now, tools: 0, lastAction: '' }))
-    await update($, meterA, m => ({ ...m, rideStartUsd: m.sessionUsd ?? 0, lastRide: undefined }))
     return next(e)
   })
 
@@ -815,14 +692,6 @@ export const register: Register = on => {
     const done = await next(e)
     if (e.agentId === undefined) {
       await update($, liveA, l => ({ ...l, isRunning: false }))
-      const endedAt = await $.clock.now()
-      await update($, meterA, m => ({
-        ...m,
-        lastRide: { usd: Math.max(0, (m.sessionUsd ?? 0) - (m.rideStartUsd ?? m.sessionUsd ?? 0)), endedAt },
-        rideStartUsd: undefined,
-      }))
-      // "지불" shows for a while, then the meter goes back to "빈차".
-      $.clock.after(PAY_SHOW_MS + 500, () => void update($, tickA, n => n + 1))
       const live = await read($, liveA)
       const worth = live.tools > 0 || e.answer.length > 200
       if (worth && !e.isAborted && (await read($, autoSummaryA))) {
@@ -843,23 +712,7 @@ export const register: Register = on => {
         await update($, modelA, () => ({ model: e.model, effort }))
       }
     }
-    if (e.agentId !== undefined) return yield* next(e)
-    const stream = next(e)
-    let first = 0
-    for await (const chunk of stream) {
-      if (!first) first = Date.now()
-      if (chunk.kind === 'text' || chunk.kind === 'thinking') noteStreamed(chunk.text.length)
-      else if (chunk.kind === 'input') noteStreamed(chunk.json.length)
-      yield chunk
-    }
-    const res = await stream.result
-    const out = res.usage?.output_tokens ?? 0
-    const secs = first ? (Date.now() - first) / 1000 : 0
-    if (out >= 20 && secs >= 0.5) {
-      const tps = out / secs
-      await update($, meterA, m => ({ ...m, tokPerSec: tps }))
-    }
-    return res
+    return yield* next(e)
   })
 
   on('session.measure', async ($, e, next) => {
@@ -876,7 +729,6 @@ export const register: Register = on => {
     const W = Math.max(24, e.props.bodyColumns)
     const R = Math.max(16, e.props.scroll.bodyRows)
     await read($, tickA)
-    await refreshLcd($)
     const now = await $.clock.now()
 
     const card = await read($, summaryA)
@@ -889,7 +741,6 @@ export const register: Register = on => {
     const cost = await read($, costA)
     const model = await read($, modelA)
     const meter = await read($, meterA)
-    const usageView = await read($, usageViewA)
     const todos = await read($, todosA)
     const files = await read($, filesA)
     const kinds = await read($, fileKindsA)
@@ -930,207 +781,17 @@ export const register: Register = on => {
     // Columns left for text inside a framed section (border 2 + padding 2).
     const inner = W - 4
 
-    // --- 0. 클로드·택시: 모델 / 미터 / 한도 (맨 위) ---
-    // Theme keys, so the meter follows the person's theme instead of fixed dark-panel hues.
-    const C = {
-      edge: 'inactive',
-      gold: 'warning',
-      white: 'text',
-      blue: 'permission',
-      lime: 'success',
-      purple: 'planMode',
-      gray: 'inactive',
-      red: 'error',
-    } as const
+    // --- 0. 사용량: 모델 / 비용 / 한도 (맨 위) ---
     // A ccusage run made before the session reported any spend counted none of it.
     const sinceCcusage = Math.max(0, (meter.sessionUsd ?? 0) - (meter.baseSessionUsd ?? 0))
     const todayUsd = cost ? cost.today + sinceCcusage : (meter.sessionUsd ?? 0)
-    const fare = groupThousands(todayUsd * KRW_PER_USD)
-    const digits = textBitmap(fare)
-    const sideW = 3 // " 원"
-    const tall = bitmapWidth(digits) + sideW <= inner
-    const withCar = tall && CAR_WIDTH + 2 + bitmapWidth(digits) + sideW <= inner
-    const digitRaster = toRaster(tall ? tallBitmap(digits) : digits, lcd.fg, lcd.bg)
-    const ctxPct = usage?.ctxPercent
-    const taxi = taxiStateOf(live, meter, tasks, ctxPct, now)
-    const carRaster = toRasterPalette(taxiCar(carStep, live.isRunning), carPalette(bodyColor(taxi, ctxPct)), lcd.bg)
-    // The chips stretch as far as the meter does (car, digits, 원).
-    const meterW = Math.min(inner, (withCar ? CAR_WIDTH + 2 : 0) + bitmapWidth(digits) + sideW)
-    const ui = $.ui.resolve(e)
-    const Raster = 'Raster' in ui ? ui.Raster : undefined
 
-    const meterRows: RenderChildren[] = []
-    let meterUsed = 2 // the frame's top and bottom
-    const mline = (node: RenderChildren, n = 1) => {
-      meterRows.push(node)
-      meterUsed += n
-    }
-
-    mline(
-      <Box key="t-head" flexDirection="row" columnGap={1}>
-        <Text bold color={C.gold}>클로드·택시</Text>
-        {model ? <Text bold color={C.white}>{modelName(model.model)}</Text> : null}
-        {model?.effort ? <Text color={C.blue}>{model.effort}</Text> : null}
-        {meter.tokPerSec !== undefined ? <Text color={C.lime}>{`${meter.tokPerSec.toFixed(1)} tok/s`}</Text> : null}
-        <Box flexGrow={1} />
-        <Button key="view-text" plain dimColor label="텍스트" onPress={() => void setUsageView($, 'text')} />
-      </Box>,
+    begin(
+      'usage',
+      '사용량',
+      <Text dimColor>{cost ? `ccusage ${fmtAgo(now - cost.updatedAt)}${cost.error ? ' (갱신 실패)' : ''}` : 'ccusage 계산 중…'}</Text>,
     )
-
-    if (Raster) {
-      mline(
-        <Box key="t-meter" flexDirection="row">
-          {withCar ? <Raster key="car" {...carRaster} /> : null}
-          {withCar ? <Text>{'  '}</Text> : null}
-          <Raster key="fare" {...digitRaster} />
-          <Box flexDirection="column" justifyContent="flex-end">
-            <Text bold color={C.white}>{' 원'}</Text>
-          </Box>
-        </Box>,
-        digitRaster.rows,
-      )
-    } else {
-      mline(<Text bold color={C.white}>{`₩${fare}`}</Text>)
-    }
-
-    /** A bar with its percentage written across the middle of it: the lit part a theme-colored block, the rest a dim track. */
-    const overlayBar = (key: string, pct: number, label: string, width: number, fill: string) => {
-      const cells = Array<string>(width).fill(' ')
-      const track = Array<string>(width).fill('░')
-      const start = Math.max(0, Math.floor((width - label.length) / 2))
-      for (let i = 0; i < label.length && start + i < width; i++) {
-        cells[start + i] = label[i] ?? ' '
-        track[start + i] = label[i] ?? ' '
-      }
-      const f = Math.min(width, Math.max(0, Math.round((pct / 100) * width)))
-      const lit = cells.slice(0, f).join('')
-      const dark = track.slice(f).join('')
-      return [
-        lit ? (
-          <Text key={`${key}-a`} bold color="inverseText" backgroundColor={fill}>
-            {lit}
-          </Text>
-        ) : null,
-        dark ? (
-          <Text key={`${key}-b`} dimColor>
-            {dark}
-          </Text>
-        ) : null,
-      ]
-    }
     {
-      const five = usage?.limits.find(l => l.kind === 'five_hour')
-      const week = usage?.limits.find(l => l.kind === 'seven_day')
-      const extra = usage?.limits.filter(l => l !== five && l !== week) ?? []
-      const hot = (p: number) => p >= 85
-      const bars = 1 + (five ? 1 : 0) + (week ? 1 : 0)
-      // labels: "context " + " 5H " + " 7D "
-      const bw = Math.max(6, Math.floor((inner - 8 - 4 * (bars - 1)) / bars))
-      /** "62%(2h10m)", or just "62%" where the bar is too short for both. */
-      const limitText = (l: WbLimit) => {
-        const left = fmtLeft(l.resetsAt, now)
-        const full = `${Math.round(l.percentUsed)}%${left}`
-        return full.length <= bw ? full : `${Math.round(l.percentUsed)}%`
-      }
-      mline(
-        <Box key="t-limits" flexDirection="row">
-          <Text color={C.lime}>{'context '}</Text>
-          {ctxPct !== undefined
-            ? overlayBar('ctx', ctxPct, `${ctxPct}%`, bw, hot(ctxPct) ? C.red : C.lime)
-            : <Text color={C.gray}>{'--'.padEnd(bw)}</Text>}
-          {five ? <Text color={hot(five.percentUsed) ? C.red : C.purple}>{' 5H '}</Text> : null}
-          {five ? overlayBar('five', five.percentUsed, limitText(five), bw, hot(five.percentUsed) ? C.red : C.purple) : null}
-          {week ? <Text color={hot(week.percentUsed) ? C.red : C.blue}>{' 7D '}</Text> : null}
-          {week ? overlayBar('week', week.percentUsed, limitText(week), bw, hot(week.percentUsed) ? C.red : C.blue) : null}
-        </Box>,
-      )
-      if (extra.length) {
-        mline(
-          <Text color={C.gray} wrap="truncate-end">
-            {extra.map(l => `${limitLabel(l.kind)} ${Math.round(l.percentUsed)}% ${fmtLeft(l.resetsAt, now)}`).join(' │ ')}
-          </Text>,
-        )
-      }
-    }
-
-    // [name, theme color]: the lit chip is a block of that color, the others dim text
-    const CHIPS: [string, string][] = [
-      ['빈차', C.gray],
-      ['주행', C.blue],
-      ['할증', C.red],
-      ['복합', C.gold],
-      ['지불', C.lime],
-    ]
-    const rideUsd = live.isRunning
-      ? Math.max(0, (meter.sessionUsd ?? 0) - (meter.rideStartUsd ?? meter.sessionUsd ?? 0))
-      : (meter.lastRide?.usd ?? 0)
-    mline(
-      <Box key="t-chips" flexDirection="row" columnGap={1}>
-        {CHIPS.map(([name, hue]) => {
-          const cw = Math.max(6, Math.floor((meterW - (CHIPS.length - 1)) / CHIPS.length))
-          const padL = Math.floor((cw - 4) / 2)
-          const label = ' '.repeat(padL) + name + ' '.repeat(cw - 4 - padL)
-          return name === taxi ? (
-            <Text key={`chip-${name}`} bold backgroundColor={hue} color="inverseText">{label}</Text>
-          ) : (
-            <Text key={`chip-${name}`} dimColor>{label}</Text>
-          )
-        })}
-      </Box>,
-    )
-    /** "$18.23 (₩25,522)": dollars first, won beside them, both in yellow. */
-    const money = (usdAmount: number) => `${usd(usdAmount)} (₩${groupThousands(usdAmount * KRW_PER_USD)})`
-    const fixed = (key: string, node: RenderChildren) => (
-      <Box key={key} flexShrink={0}>
-        {node}
-      </Box>
-    )
-    mline(
-      <Box key="t-money" flexDirection="row">
-        {taxi !== '빈차'
-          ? fixed(
-              'm-ride',
-              <Text>
-                <Text color={C.gray}>{taxi === '지불' ? '요금 ' : '이번 주행 '}</Text>
-                <Text color={C.gold}>{money(rideUsd)}</Text>
-                <Text color={C.gray}>{' · '}</Text>
-              </Text>,
-            )
-          : null}
-        {cost
-          ? fixed(
-              'm-sum',
-              <Text>
-                <Text color={C.gray}>{'오늘 '}</Text>
-                <Text color={C.gold}>{money(todayUsd)}</Text>
-                <Text color={C.gray}>{` · ${cost.monthStart}~ `}</Text>
-                <Text color={C.gold}>{money(cost.month)}</Text>
-              </Text>,
-            )
-          : null}
-        <Text color={C.gray} wrap="truncate-end">
-          {cost ? ` · ccusage ${fmtAgo(now - cost.updatedAt)}${cost.error ? ' 실패' : ''}` : 'ccusage 계산 중…'}
-        </Text>
-      </Box>,
-    )
-
-    if (usageView === 'gui') line(
-      <Box key="taxi" flexDirection="column" borderStyle="round" borderColor={C.edge} paddingX={1}>
-        {meterRows}
-      </Box>,
-      meterUsed,
-    )
-
-    // --- 0'. 사용량 (텍스트 보기: 미터기 이전의 표, 미터와 같은 맨 위 자리) ---
-    if (usageView === 'text') {
-      begin(
-        'usage',
-        '사용량',
-        <Box flexDirection="row" columnGap={1}>
-          <Text dimColor>{cost ? `ccusage ${fmtAgo(now - cost.updatedAt)}${cost.error ? ' (갱신 실패)' : ''}` : 'ccusage 계산 중…'}</Text>
-          <Button key="view-gui" plain dimColor label="GUI" onPress={() => void setUsageView($, 'gui')} />
-        </Box>,
-      )
       const labelW = 9
       if (model) {
         line(

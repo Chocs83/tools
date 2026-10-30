@@ -55,13 +55,10 @@ export type WbCost = {
   error?: string
 }
 
-/** The taximeter's running figures, in USD; the session's own ledger moves the meter between ccusage runs. */
+/** The session's own spend, in USD: what it has cost so far, and how much of that the last ccusage run already counted. */
 export type WbMeter = {
   sessionUsd?: number
   baseSessionUsd?: number
-  rideStartUsd?: number
-  lastRide?: { usd: number; endedAt: number }
-  tokPerSec?: number
 }
 
 export type WbModel = { model: string; effort?: string }
@@ -80,7 +77,6 @@ declare module 'claude-code' {
       usage: WbUsage | null
       model: WbModel | null
       meter: WbMeter
-      usageView: 'gui' | 'text'
       cost: WbCost | null
       todos: WbTodo[]
       files: WbFile[]

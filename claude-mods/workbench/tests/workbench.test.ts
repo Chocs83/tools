@@ -58,7 +58,7 @@ const start = ($: any) => $.session.start({ source: 'startup', cwd: '/w' })
 test('pane draws the four sections', async ($: any, on: any) => {
   mock.clock(on, { now: NOW })
   const ui = await mountPane($)
-  for (const title of ['클로드·택시', '▍작업', '▍할일', '▍오늘 결과물']) {
+  for (const title of ['▍사용량', '▍작업', '▍할일', '▍오늘 결과물']) {
     expect(await ui.find({ type: 'Text', text: title })).toBeDefined()
   }
   await ui.unmount()
@@ -74,11 +74,10 @@ test('session start fills cost, gauges and files', async ($: any, on: any) => {
   expect(await ui.find({ type: 'Text', text: /\$16\.73/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /\$43\.77/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /62%/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: 'context ' })).toBeDefined()
-  // the meter reads today's ccusage cost in won: 16.73 * 1400
-  // digits and horse are five terminal rows tall
-  expect(await ui.find({ key: 'fare' })).toMatchObject({ props: { rows: 5 } })
-  expect(await ui.find({ key: 'car' })).toMatchObject({ props: { rows: 5, columns: 20 } })
+  expect(await ui.find({ key: 'g-ctx' })).toBeDefined()
+  // the usage table sits first in the pane, above 작업
+  const order = (await ui.findAll({ type: 'Text' })).map((t: any) => t.text)
+  expect(order.indexOf('▍사용량')).toBeLessThan(order.indexOf('▍작업'))
   // default filter: images, md, docs — the csv is hidden
   expect(await ui.find({ type: 'Button', text: /plot\.png/ })).toBeDefined()
   expect(await ui.find({ type: 'Button', text: /notes\.md/ })).toBeDefined()
@@ -178,12 +177,10 @@ test('an empty transcript says so instead of asking the model', async ($: any, o
   await ui.unmount()
 })
 
-test('the taximeter runs a ride and asks the fare', async ($: any, on: any) => {
-  const { clock } = world(on, { ssh: false })
+test('the session ledger moves 오늘 between ccusage runs', async ($: any, on: any) => {
+  const { clock } = world(on)
   on('session.start', ($2: any, e: any) => ({ cwd: e.cwd }))
   on('session.measure', ($2: any, e: any) => ({ changed: e.changed }))
-  on('turn.start', ($2: any, e: any) => ({ turnId: e.turnId }))
-  on('turn.complete', ($2: any, e: any) => ({ text: e.answer }))
   await start($)
   await clock.settle()
   const measure = (usd: number) =>
@@ -198,53 +195,13 @@ test('the taximeter runs a ride and asks the fare', async ($: any, on: any) => {
     })
   await measure(1.0)
   const ui = await mountPane($)
-  expect(await ui.find({ type: 'Text', text: ' 빈차 ' })).toMatchObject({ props: { bold: true } })
-
-  await $.turn.start({ text: 'go', turnId: 't1' })
+  // ccusage said $16.73 today; the session has spent $1.00 since that run counted $0
+  expect((await ui.find({ key: 'c-today' }))?.text).toContain('$17.73')
   await measure(1.5)
-  // context 75% while driving: surcharge, which outranks 복합
-  expect(await ui.find({ type: 'Text', text: ' 할증 ' })).toMatchObject({ props: { bold: true } })
-  // dollars first, won in parentheses; the month named by its first day
-  expect((await ui.find({ key: 't-money' }))?.text).toContain('이번 주행 $0.50 (₩700) · 오늘 $18.23 (₩25,522) · 10/1~ $43.77 (₩61,278) · ccusage')
-  // context and the 5-hour limit carry their percentage inside the bar
-  expect(await ui.find({ type: 'Text', text: /75%/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /62%/ })).toBeDefined()
-  // 5H and 7D are bars like context, the time left written inside: 62%(2h00m)
-  const limits = (await ui.find({ key: 't-limits' }))?.text ?? ''
-  expect(limits).toContain('62%(2h00m)')
-  expect(limits).toContain(' 5H ')
-  expect(limits).toContain(' 7D ')
-  expect(limits).toContain('25%')
-
-  await $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' })
-  await clock.settle()
-  expect(await ui.find({ type: 'Text', text: ' 지불 ' })).toMatchObject({ props: { bold: true } })
-  expect((await ui.find({ key: 't-money' }))?.text).toMatch(/^요금 \$0\.50 \(₩700\) · 오늘/)
-  await clock.advance(16_000)
-  expect(await ui.find({ type: 'Text', text: ' 빈차 ' })).toMatchObject({ props: { bold: true } })
-  await ui.unmount()
-})
-
-test('the usage view switches between the meter and the plain table', async ($: any, on: any) => {
-  const { clock } = world(on, { ssh: false })
-  on('session.start', ($2: any, e: any) => ({ cwd: e.cwd }))
-  await start($)
-  await clock.settle()
-  const ui = await mountPane($)
-  // GUI by default: the taxi meter on top, no plain table
-  expect(await ui.find({ key: 'taxi' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '▍사용량' })).toBeUndefined()
-
-  await ui.press({ key: 'view-text' })
-  expect(await ui.find({ key: 'taxi' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: '▍사용량' })).toBeDefined()
-  expect(await ui.find({ key: 'c-today' })).toBeDefined()
-  expect(await ui.find({ key: 'g-ctx' })).toBeDefined()
-  // the table takes the meter's place: first in the pane, above 작업
-  const order = (await ui.findAll({ type: 'Text' })).map((t: any) => t.text)
-  expect(order.indexOf('▍사용량')).toBeLessThan(order.indexOf('▍작업'))
-
-  await ui.press({ key: 'view-gui' })
-  expect(await ui.find({ key: 'taxi' })).toBeDefined()
+  expect((await ui.find({ key: 'c-today' }))?.text).toContain('$18.23')
+  // the limits: percentage, then the time left
+  expect((await ui.find({ key: 'g-five_hour' }))?.text).toContain('62%')
+  expect((await ui.find({ key: 'g-seven_day' }))?.text).toContain('25%')
+  expect((await ui.find({ key: 'g-ctx' }))?.text).toContain('75%')
   await ui.unmount()
 })
