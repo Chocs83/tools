@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# 영역 스크린샷: 드래그로 범위를 고르는 순간 ~/사진/Screenshots 에 저장하고 클립보드에도 넣는다
+# (Windows 의 Win+Shift+S 처럼 촬영 버튼 없이). GNOME 사용자 지정 단축키 Super+Shift+S 에 묶어 쓴다.
+# 필요: gnome-screenshot, wl-clipboard(Wayland) 또는 xclip(X11)
+d="$HOME/사진/Screenshots"; mkdir -p "$d"
+f="$d/스크린샷_$(date +%Y%m%d_%H%M%S).png"
+gnome-screenshot -a -f "$f" || exit 1
+[ -s "$f" ] || exit 1
+if [ "${XDG_SESSION_TYPE:-}" = wayland ]; then wl-copy --type image/png < "$f"; else xclip -selection clipboard -t image/png -i "$f"; fi
