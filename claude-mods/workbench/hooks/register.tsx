@@ -46,8 +46,21 @@ const KEEP_FINISHED = 6
 // Fixed rate for the meter's 원 figure; the USD figures stay exact beside it.
 const KRW_PER_USD = 1400
 const PAY_SHOW_MS = 15_000
-const LCD_BG = 0x141414
-const DIGIT_FG = 0xf2f2f2
+// The meter's LCD: a dark glass on dark themes, a pale one (Solarized base2/base02) on light themes.
+const LCD = {
+  dark: { bg: 0x141414, fg: 0xf2f2f2, car: { K: 0x3a3a3a, C: 0xb8b8b8, D: 0x4a4a4a, R: 0xf2f2f2, S: 0x8a8a8a } },
+  light: { bg: 0xeee8d5, fg: 0x073642, car: { K: 0x586e75, C: 0x93a1a1, D: 0x657b83, R: 0x073642, S: 0x586e75 } },
+}
+let lcd = LCD.dark
+/** Picks the LCD palette from the person's theme (`/config` → theme); light-* themes take the pale glass. */
+const refreshLcd = async ($: EngineInterface) => {
+  try {
+    const row = (await $.config.list()).find(r => r.key === 'theme')
+    lcd = String(row?.value ?? 'dark').startsWith('light') ? LCD.light : LCD.dark
+  } catch {
+    /* no config surface: keep the current palette */
+  }
+}
 const BODY_GRAY = 0x8a8a8a
 const BODY_GREEN = 0x7cdb6e
 
@@ -82,11 +95,7 @@ const carPalette = (body: number): Record<string, number> => ({
   B: body,
   W: 0x9fd3ff,
   L: 0xfff3b0,
-  K: 0x3a3a3a,
-  C: 0xb8b8b8,
-  D: 0x4a4a4a,
-  R: 0xf2f2f2,
-  S: 0x8a8a8a,
+  ...lcd.car,
 })
 
 // How fast the model is writing right now, from the streamed pieces (about 4 characters a token).
@@ -454,7 +463,8 @@ const onNotifications = async ($: $T, text: string) => {
     const summary = unescapeXml(body.match(/<summary>([\s\S]*?)<\/summary>/)?.[1] ?? '')
     const event = unescapeXml(body.match(/<event>([\s\S]*?)<\/event>/)?.[1] ?? '')
     const outputPath = body.match(/<output-file>([^<]+)<\/output-file>/)?.[1]?.trim()
-    const monitorEnded = /\[Monitor (timed out|stopped|ended|exited)/i.test(event)
+    // The engine's wording for a monitor's end: '[Monitor expired after 30m …]', '[Monitor stopped …]', ….
+    const monitorEnded = /\[Monitor (expired|timed out|stopped|ended|exited|killed|cancelled)/i.test(event)
     const mapped: WbTask['status'] | undefined =
       status === 'completed'
         ? 'completed'
@@ -480,6 +490,15 @@ const onNotifications = async ($: $T, text: string) => {
       return { ...base, tail }
     })
   }
+}
+
+// Marks every task still shown as running as ended (optionally only those older than `olderThanMs`).
+// Used by `/wb task clear` and, on reload, to retire monitors whose end notice an older version missed.
+const retireRunning = async ($: $T, olderThanMs = 0) => {
+  const now = await $.clock.now()
+  await update($, tasksA, list =>
+    list.map((t): WbTask => (t.status === 'running' && now - t.startedAt >= olderThanMs ? { ...t, status: 'killed', endedAt: now } : t)),
+  )
 }
 
 const pollTails = async ($: $T) => {
@@ -630,13 +649,15 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'wb',
-      description: '작업대 pane 열기 (/wb sum: 세션 전체 정밀 요약, /wb todo clear: 할일 비우기, /wb gui|text: 사용량 표시 방식, /wb close: 닫기)',
-      argumentHint: '[sum|todo clear|gui|text|close]',
+      description: '작업대 pane 열기 (/wb sum: 세션 전체 정밀 요약, /wb todo clear: 할일 비우기, /wb task clear: 백그라운드 작업 목록 정리, /wb gui|text: 사용량 표시 방식, /wb close: 닫기)',
+      argumentHint: '[sum|todo clear|task clear|gui|text|close]',
     })
 
     home = (await $.env.get('HOME')) ?? ''
     // A reload mid-summary never reaches summarize's finally; the flag would stick.
     await update($, summaryBusyA, () => false)
+    // A monitor lives at most 30 min; one still 'running' past an hour is a notice this mod missed (e.g. before a reload).
+    await retireRunning($, 60 * 60_000)
 
     const tz = await $.process.run(['date', '+%z'], { timeoutMs: 3000 })
     const m = tz.stdout.trim().match(/^([+-])(\d\d)(\d\d)$/)
@@ -705,7 +726,7 @@ export const register: Register = on => {
         const key = `${live.isRunning ? carStep : 'parked'}:${color}`
         if (key === shown) return
         shown = key
-        const r = toRasterPalette(taxiCar(carStep, live.isRunning), carPalette(color), LCD_BG)
+        const r = toRasterPalette(taxiCar(carStep, live.isRunning), carPalette(color), lcd.bg)
         await $.ui.blit({ requestId: PANE, key: 'car', cells: r.cells }).catch(() => undefined)
       })()
     })
@@ -725,6 +746,7 @@ export const register: Register = on => {
     await $.ui.open({ id: PANE, title: TITLE })
     if (arg === 'sum') void summarize($, 'fork')
     if (arg === 'todo clear') await saveTodos($, [])
+    if (arg === 'task clear') await retireRunning($)
     if (arg === 'gui' || arg === 'text') await setUsageView($, arg)
     return {}
   })
@@ -854,6 +876,7 @@ export const register: Register = on => {
     const W = Math.max(24, e.props.bodyColumns)
     const R = Math.max(16, e.props.scroll.bodyRows)
     await read($, tickA)
+    await refreshLcd($)
     const now = await $.clock.now()
 
     const card = await read($, summaryA)
@@ -874,8 +897,11 @@ export const register: Register = on => {
 
     let used = 0
     const rows: RenderChildren[] = []
+    // Each section is a rounded box: its rows gather in `cur` until `end()` frames them.
+    let cur: RenderChildren[] | null = null
+    let curKey = ''
     const line = (node: RenderChildren, n = 1) => {
-      rows.push(node)
+      ;(cur ?? rows).push(node)
       used += n
     }
     const rule = (title: string, right?: RenderChildren) => (
@@ -886,22 +912,36 @@ export const register: Register = on => {
         {right ?? <Text> </Text>}
       </Box>
     )
-    const gap = () => line(<Text> </Text>)
+    const begin = (key: string, title: string, right?: RenderChildren) => {
+      cur = []
+      curKey = key
+      used += 2 // the frame's top and bottom
+      line(rule(title, right))
+    }
+    const end = () => {
+      if (!cur) return
+      rows.push(
+        <Box key={curKey} flexDirection="column" borderStyle="round" borderColor="inactive" paddingX={1}>
+          {cur}
+        </Box>,
+      )
+      cur = null
+    }
+    // Columns left for text inside a framed section (border 2 + padding 2).
+    const inner = W - 4
 
     // --- 0. 클로드·택시: 모델 / 미터 / 한도 (맨 위) ---
+    // Theme keys, so the meter follows the person's theme instead of fixed dark-panel hues.
     const C = {
-      panel: '#141414',
-      edge: '#3a3a3a',
-      gold: '#e8c547',
-      white: '#f2f2f2',
-      blue: '#7aa2ff',
-      lime: '#b6e35a',
-      purple: '#c58cff',
-      purpleDim: '#4a3566',
-      gray: '#8a8a8a',
-      red: '#ff6b6b',
-    }
-    const inner = W - 4
+      edge: 'inactive',
+      gold: 'warning',
+      white: 'text',
+      blue: 'permission',
+      lime: 'success',
+      purple: 'planMode',
+      gray: 'inactive',
+      red: 'error',
+    } as const
     // A ccusage run made before the session reported any spend counted none of it.
     const sinceCcusage = Math.max(0, (meter.sessionUsd ?? 0) - (meter.baseSessionUsd ?? 0))
     const todayUsd = cost ? cost.today + sinceCcusage : (meter.sessionUsd ?? 0)
@@ -910,10 +950,10 @@ export const register: Register = on => {
     const sideW = 3 // " 원"
     const tall = bitmapWidth(digits) + sideW <= inner
     const withCar = tall && CAR_WIDTH + 2 + bitmapWidth(digits) + sideW <= inner
-    const digitRaster = toRaster(tall ? tallBitmap(digits) : digits, DIGIT_FG, LCD_BG)
+    const digitRaster = toRaster(tall ? tallBitmap(digits) : digits, lcd.fg, lcd.bg)
     const ctxPct = usage?.ctxPercent
     const taxi = taxiStateOf(live, meter, tasks, ctxPct, now)
-    const carRaster = toRasterPalette(taxiCar(carStep, live.isRunning), carPalette(bodyColor(taxi, ctxPct)), LCD_BG)
+    const carRaster = toRasterPalette(taxiCar(carStep, live.isRunning), carPalette(bodyColor(taxi, ctxPct)), lcd.bg)
     // The chips stretch as far as the meter does (car, digits, 원).
     const meterW = Math.min(inner, (withCar ? CAR_WIDTH + 2 : 0) + bitmapWidth(digits) + sideW)
     const ui = $.ui.resolve(e)
@@ -953,22 +993,26 @@ export const register: Register = on => {
       mline(<Text bold color={C.white}>{`₩${fare}`}</Text>)
     }
 
-    /** A bar with its percentage written across the middle of it. */
-    const overlayBar = (key: string, pct: number, label: string, width: number, fill: string, empty: string) => {
+    /** A bar with its percentage written across the middle of it: the lit part a theme-colored block, the rest a dim track. */
+    const overlayBar = (key: string, pct: number, label: string, width: number, fill: string) => {
       const cells = Array<string>(width).fill(' ')
+      const track = Array<string>(width).fill('░')
       const start = Math.max(0, Math.floor((width - label.length) / 2))
-      for (let i = 0; i < label.length && start + i < width; i++) cells[start + i] = label[i] ?? ' '
+      for (let i = 0; i < label.length && start + i < width; i++) {
+        cells[start + i] = label[i] ?? ' '
+        track[start + i] = label[i] ?? ' '
+      }
       const f = Math.min(width, Math.max(0, Math.round((pct / 100) * width)))
       const lit = cells.slice(0, f).join('')
-      const dark = cells.slice(f).join('')
+      const dark = track.slice(f).join('')
       return [
         lit ? (
-          <Text key={`${key}-a`} bold color="#ffffff" backgroundColor={fill}>
+          <Text key={`${key}-a`} bold color="inverseText" backgroundColor={fill}>
             {lit}
           </Text>
         ) : null,
         dark ? (
-          <Text key={`${key}-b`} bold color="#ffffff" backgroundColor={empty}>
+          <Text key={`${key}-b`} dimColor>
             {dark}
           </Text>
         ) : null,
@@ -992,12 +1036,12 @@ export const register: Register = on => {
         <Box key="t-limits" flexDirection="row">
           <Text color={C.lime}>{'context '}</Text>
           {ctxPct !== undefined
-            ? overlayBar('ctx', ctxPct, `${ctxPct}%`, bw, hot(ctxPct) ? '#b83a3a' : '#5f8a22', '#26331a')
+            ? overlayBar('ctx', ctxPct, `${ctxPct}%`, bw, hot(ctxPct) ? C.red : C.lime)
             : <Text color={C.gray}>{'--'.padEnd(bw)}</Text>}
           {five ? <Text color={hot(five.percentUsed) ? C.red : C.purple}>{' 5H '}</Text> : null}
-          {five ? overlayBar('five', five.percentUsed, limitText(five), bw, hot(five.percentUsed) ? '#b83a3a' : '#7d55b8', '#33264a') : null}
+          {five ? overlayBar('five', five.percentUsed, limitText(five), bw, hot(five.percentUsed) ? C.red : C.purple) : null}
           {week ? <Text color={hot(week.percentUsed) ? C.red : C.blue}>{' 7D '}</Text> : null}
-          {week ? overlayBar('week', week.percentUsed, limitText(week), bw, hot(week.percentUsed) ? '#b83a3a' : '#3f63b8', '#1f2a4a') : null}
+          {week ? overlayBar('week', week.percentUsed, limitText(week), bw, hot(week.percentUsed) ? C.red : C.blue) : null}
         </Box>,
       )
       if (extra.length) {
@@ -1009,27 +1053,27 @@ export const register: Register = on => {
       }
     }
 
-    // [name, lit background, lit text, unlit background, unlit text]: each its own hue, lit = brighter
-    const CHIPS: [string, string, string, string, string][] = [
-      ['빈차', '#b8b8b8', '#111111', '#4a4a4a', '#c8c8c8'],
-      ['주행', '#c3c3ff', '#14143a', '#45457e', '#c9c9f0'],
-      ['할증', '#ff7f9f', '#2a0a12', '#7e3549', '#f0c2cd'],
-      ['복합', '#f0c43a', '#1e1800', '#73601e', '#efe0a8'],
-      ['지불', '#7fd36b', '#0c1f08', '#2f6427', '#c4e8ba'],
+    // [name, theme color]: the lit chip is a block of that color, the others dim text
+    const CHIPS: [string, string][] = [
+      ['빈차', C.gray],
+      ['주행', C.blue],
+      ['할증', C.red],
+      ['복합', C.gold],
+      ['지불', C.lime],
     ]
     const rideUsd = live.isRunning
       ? Math.max(0, (meter.sessionUsd ?? 0) - (meter.rideStartUsd ?? meter.sessionUsd ?? 0))
       : (meter.lastRide?.usd ?? 0)
     mline(
       <Box key="t-chips" flexDirection="row" columnGap={1}>
-        {CHIPS.map(([name, litBg, litFg, offBg, offFg]) => {
+        {CHIPS.map(([name, hue]) => {
           const cw = Math.max(6, Math.floor((meterW - (CHIPS.length - 1)) / CHIPS.length))
           const padL = Math.floor((cw - 4) / 2)
           const label = ' '.repeat(padL) + name + ' '.repeat(cw - 4 - padL)
           return name === taxi ? (
-            <Text key={`chip-${name}`} bold backgroundColor={litBg} color={litFg}>{label}</Text>
+            <Text key={`chip-${name}`} bold backgroundColor={hue} color="inverseText">{label}</Text>
           ) : (
-            <Text key={`chip-${name}`} backgroundColor={offBg} color={offFg}>{label}</Text>
+            <Text key={`chip-${name}`} dimColor>{label}</Text>
           )
         })}
       </Box>,
@@ -1071,14 +1115,7 @@ export const register: Register = on => {
     )
 
     if (usageView === 'gui') line(
-      <Box
-        key="taxi"
-        flexDirection="column"
-        borderStyle="round"
-        borderColor={C.edge}
-        backgroundColor={C.panel}
-        paddingX={1}
-      >
+      <Box key="taxi" flexDirection="column" borderStyle="round" borderColor={C.edge} paddingX={1}>
         {meterRows}
       </Box>,
       meterUsed,
@@ -1086,14 +1123,13 @@ export const register: Register = on => {
 
     // --- 0'. 사용량 (텍스트 보기: 미터기 이전의 표, 미터와 같은 맨 위 자리) ---
     if (usageView === 'text') {
-      line(
-        rule(
-          '사용량',
-          <Box flexDirection="row" columnGap={1}>
-            <Text dimColor>{cost ? `ccusage ${fmtAgo(now - cost.updatedAt)}${cost.error ? ' (갱신 실패)' : ''}` : 'ccusage 계산 중…'}</Text>
-            <Button key="view-gui" plain dimColor label="GUI" onPress={() => void setUsageView($, 'gui')} />
-          </Box>,
-        ),
+      begin(
+        'usage',
+        '사용량',
+        <Box flexDirection="row" columnGap={1}>
+          <Text dimColor>{cost ? `ccusage ${fmtAgo(now - cost.updatedAt)}${cost.error ? ' (갱신 실패)' : ''}` : 'ccusage 계산 중…'}</Text>
+          <Button key="view-gui" plain dimColor label="GUI" onPress={() => void setUsageView($, 'gui')} />
+        </Box>,
       )
       const labelW = 9
       if (model) {
@@ -1109,19 +1145,19 @@ export const register: Register = on => {
           <Box key="c-today" flexDirection="row">
             <Text>{'오늘'.padEnd(labelW - 2)}</Text>
             <Text bold>{usd(todayUsd).padStart(9)}</Text>
-            <Text dimColor>{`  ${kTokens(cost.todayTokens)} tok`}</Text>
+            <Text dimColor>{`  ${kTokens(cost.todayTokens)}`}</Text>
           </Box>,
         )
         line(
           <Box key="c-month" flexDirection="row">
             <Text>{'이번 달'.padEnd(labelW - 3)}</Text>
             <Text bold>{usd(cost.month).padStart(9)}</Text>
-            <Text dimColor>{`  ${cost.monthStart}~ · ${kTokens(cost.monthTokens)} tok`}</Text>
+            <Text dimColor>{`  ${kTokens(cost.monthTokens)}`}</Text>
           </Box>,
         )
       }
       const tailW = 22
-      const barW = Math.min(24, Math.max(6, W - labelW - tailW))
+      const barW = Math.min(24, Math.max(6, inner - labelW - tailW))
       const gauge = (label: string, pct: number | undefined, right: string, key: string) =>
         line(
           <Box key={key} flexDirection="row">
@@ -1134,28 +1170,27 @@ export const register: Register = on => {
         for (const l of usage.limits) gauge(limitLabel(l.kind), l.percentUsed, fmtLeft(l.resetsAt, now), `g-${l.kind}`)
         gauge('컨텍스트', usage.ctxPercent, `${kTokens(usage.ctxTokens)}/${kTokens(usage.ctxWindow)}`, 'g-ctx')
       }
+      end()
     }
 
     // --- 1. 작업: 요약 + 진행 + 백그라운드 작업 ---
-    gap()
-    line(
-      rule(
-        '작업',
-        <Box flexDirection="row" gap={1}>
-          <Button key="sum-refresh" plain dimColor label={busy ? '…' : '↻'} onPress={() => void summarize($, 'auto')} />
-          <Button key="sum-fork" plain dimColor label="정밀" onPress={() => void summarize($, 'fork')} />
-          <Button
-            key="sum-auto"
-            plain
-            dimColor
-            label={auto ? '자동:켬' : '자동:끔'}
-            onPress={() => void update($, autoSummaryA, v => !v)}
-          />
-        </Box>,
-      ),
+    begin(
+      'work',
+      '작업',
+      <Box flexDirection="row" gap={1}>
+        <Button key="sum-refresh" plain dimColor label={busy ? '…' : '↻'} onPress={() => void summarize($, 'auto')} />
+        <Button key="sum-fork" plain dimColor label="정밀" onPress={() => void summarize($, 'fork')} />
+        <Button
+          key="sum-auto"
+          plain
+          dimColor
+          label={auto ? '자동:켬' : '자동:끔'}
+          onPress={() => void update($, autoSummaryA, v => !v)}
+        />
+      </Box>,
     )
     if (card) {
-      if (card.goal) line(<Text wrap="wrap">{'🎯 ' + card.goal}</Text>, Math.ceil((card.goal.length * 2 + 3) / W))
+      if (card.goal) line(<Text wrap="wrap">{'🎯 ' + card.goal}</Text>, Math.ceil((card.goal.length * 2 + 3) / inner))
       if (card.now) line(<Text color="suggestion" wrap="truncate-end">{'▶ ' + card.now}</Text>)
       if (card.done.length) line(<Text dimColor>최근 수행</Text>)
       for (const d of card.done) line(<Text dimColor wrap="truncate-end">{'  ✓ ' + d}</Text>)
@@ -1193,7 +1228,7 @@ export const register: Register = on => {
       )
       const pct = t.tail ? progressOf(t.tail) : undefined
       if (pct !== undefined) {
-        const bw = Math.min(20, Math.max(6, Math.floor(W / 3)))
+        const bw = Math.min(20, Math.max(6, Math.floor(inner / 3)))
         line(
           <Box key={`p-${t.id}`} flexDirection="row">
             <Text>{'  '}</Text>
@@ -1217,50 +1252,49 @@ export const register: Register = on => {
       )
     }
 
+    end()
+
     // --- 3. 할일: 정해진 목표를 단계로 나눈 목록 (클릭 = 상태 바꾸기) ---
-    gap()
     const nDone = todos.filter(t => t.state === 'done').length
-    line(
-      rule(
-        '할일',
-        <Box flexDirection="row" gap={1}>
-          {todos.length ? <Text dimColor>{`${nDone}/${todos.length}`}</Text> : null}
-          {nDone ? (
-            <Button
-              key="todo-sweep"
-              plain
-              dimColor
-              label="끝난것 지움"
-              onPress={() => void saveTodos($, todos.filter(t => t.state !== 'done'))}
-            />
-          ) : null}
-        </Box>,
-      ),
+    begin(
+      'todos',
+      '할일',
+      <Box flexDirection="row" gap={1}>
+        {todos.length ? <Text dimColor>{`${nDone}/${todos.length}`}</Text> : null}
+        {nDone ? (
+          <Button
+            key="todo-sweep"
+            plain
+            dimColor
+            label="끝난것 지움"
+            onPress={() => void saveTodos($, todos.filter(t => t.state !== 'done'))}
+          />
+        ) : null}
+      </Box>,
     )
     if (!todos.length) {
       line(<Text dimColor>목표가 정해지면 할일을 항목으로 나누어 표시 (요약과 함께 갱신)</Text>)
     }
     for (const t of todos) {
       const mark = t.state === 'done' ? '[x]' : t.state === 'doing' ? '[▶]' : '[ ]'
-      rows.push(
+      line(
         <Box key={`t-${t.id}`} flexDirection="row">
           <Button
             key={`todo-${t.id}`}
             plain
             dimColor={t.state === 'done'}
-            label={clip(`${mark} ${t.text}`, Math.max(8, W - 3))}
+            label={clip(`${mark} ${t.text}`, Math.max(8, inner - 3))}
             onPress={() => void cycleTodo($, t.id)}
           />
           <Button key={`todo-rm-${t.id}`} plain dimColor label=" ×" onPress={() => void removeTodo($, t.id)} />
         </Box>,
       )
-      used += 1
     }
+    end()
 
     // --- 4. 오늘 결과물 ---
-    gap()
     const shown = files.filter(f => kinds.includes(kindOf(f.path)))
-    line(rule('오늘 결과물', <Text dimColor>{`${shown.length}/${files.length} · ~/tmp`}</Text>))
+    begin('files', '오늘 결과물', <Text dimColor>{`${shown.length}/${files.length} · ~/tmp`}</Text>)
     line(
       <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
         {KINDS.map(k => {
@@ -1290,16 +1324,17 @@ export const register: Register = on => {
     for (const f of shown.slice(0, room)) {
       const rel = f.path.startsWith(tmpRoot) ? f.path.slice(tmpRoot.length) : f.path
       const label = `${local(f.mtime, tz).hm}  ${rel}`
-      rows.push(
+      line(
         <Button
           key={`f-${f.path}`}
           plain
-          label={clip(label, W - 1)}
+          label={clip(label, inner - 1)}
           onPress={() => void openInWindows($, f.path)}
         />,
       )
     }
-    if (shown.length > room) rows.push(<Text dimColor>{`  … ${shown.length - room}개 더`}</Text>)
+    if (shown.length > room) line(<Text dimColor>{`  … ${shown.length - room}개 더`}</Text>)
+    end()
 
     return (
       <Box flexDirection="column" width={W}>
